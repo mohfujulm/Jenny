@@ -1,0 +1,36 @@
+.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local application data can contain company documents, conversations, paths, and embeddings.
+app/data/
+
+# Local Codex and agent configuration.
+.codex/
+.agents/
+
+# Generated files and temporary workspaces.
+outputs/
+work/
+tag-update-test-*/
+
+# Runtime logs and temporary database files.
+*.log
+*.sqlite
+*.sqlite-*
+*.sqlite.*
+
+# Editor and operating-system files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

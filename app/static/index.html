@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Team Knowledge Agent</title>
+    <link rel="stylesheet" href="{{APP_CSS_URL}}">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand sidebar-brand">
+          <div>
+            <p class="eyebrow">Database-driven AI assistant</p>
+            <h1>Ask Jenny</h1>
+          </div>
+          <span class="sidebar-brand-mark" aria-hidden="true">AI</span>
+        </div>
+
+        <nav class="sidebar-nav" aria-label="Primary">
+          <button id="newConversationButton" class="sidebar-nav-button is-active" type="button">
+            <span class="sidebar-nav-icon" aria-hidden="true">+</span>
+            New chat
+          </button>
+          <label class="sidebar-search" for="conversationSearchInput">
+            <span class="sidebar-nav-icon" aria-hidden="true">⌕</span>
+            <input
+              id="conversationSearchInput"
+              name="conversationSearch"
+              type="text"
+              maxlength="120"
+              placeholder="Search recents"
+            >
+          </label>
+          <button id="openLibraryButton" class="sidebar-nav-button" type="button">
+            <span class="sidebar-nav-icon" aria-hidden="true">▤</span>
+            Library
+          </button>
+        </nav>
+
+        <div class="panel conversation-panel">
+          <div class="panel-head conversation-panel-head">
+            <h2>Recents</h2>
+            <span class="autosave-pill">Autosaves</span>
+            <button id="saveConversationButton" class="ghost-button is-hidden" type="button">Save current</button>
+          </div>
+          <p id="conversationMemoryStatus" class="conversation-memory-status">
+            Conversations save automatically after each assistant reply.
+          </p>
+          <div id="savedConversationList" class="saved-conversation-list" aria-live="polite"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Source Mode</h2>
+          <div class="mode-toggle" role="group" aria-label="Source preference">
+            <button
+              class="mode-button is-active"
+              type="button"
+              data-source-mode="internal"
+            >
+              Internal docs
+            </button>
+            <button
+              class="mode-button"
+              type="button"
+              data-source-mode="broader"
+            >
+              Broader view
+            </button>
+          </div>
+          <p id="modeDescription" class="mode-description">
+            Prioritizes internal documents and avoids filling gaps with general knowledge.
+          </p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Context Scope</h2>
+          </div>
+          <p id="contextSummary" class="mode-description">
+            All indexed documents are currently available for retrieval.
+          </p>
+          <div id="contextChipList" class="context-chip-list"></div>
+          <button id="clearContextButton" class="secondary-button compact-button" type="button">
+            Use all docs
+          </button>
+        </div>
+
+      </aside>
+
+      <main class="chat-stage">
+        <div id="messageList" class="message-list" aria-live="polite"></div>
+
+        <form id="composerForm" class="composer">
+          <label class="composer-label" for="messageInput">Ask the agent</label>
+          <textarea
+            id="messageInput"
+            name="message"
+            rows="3"
+            placeholder="Ask about policies, documents, onboarding, billing, support, or general questions."
+          ></textarea>
+          <div class="composer-row">
+            <p id="composerNote" class="composer-note">Internal facts should come from the datastore, not memory.</p>
+            <button id="sendButton" class="primary-button" type="submit">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <div id="savedConversationContextMenu" class="saved-conversation-context-menu is-hidden" aria-hidden="true">
+      <button id="savedConversationRenameButton" class="saved-conversation-context-menu-item" type="button">
+        Rename conversation
+      </button>
+      <button id="savedConversationDeleteButton" class="saved-conversation-context-menu-item saved-conversation-context-menu-item-danger" type="button">
+        Delete conversation
+      </button>
+    </div>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <div class="message-meta"></div>
+        <div class="message-body"></div>
+        <div class="message-footer"></div>
+      </article>
+    </template>
+
+    <div id="documentBrowser" class="browser-modal is-hidden" aria-hidden="true">
+      <div class="browser-backdrop" data-close-browser></div>
+      <div class="browser-dialog" role="dialog" aria-modal="true" aria-labelledby="browserTitle">
+        <div class="browser-header">
+          <div>
+            <p class="eyebrow">Embedded Library</p>
+            <h2 id="browserTitle">Indexed Documents</h2>
+            <p id="browserStats" class="browser-stats">Loading library...</p>
+          </div>
+          <button id="closeBrowserButton" class="ghost-button" type="button">Close</button>
+        </div>
+
+        <div class="browser-body">
+          <section class="browser-scope">
+            <div class="browser-pane-head">
+              <p class="eyebrow">Scope</p>
+              <h3>Retrieval Workspace</h3>
+              <p class="mode-description">
+                Track which folders or documents are currently included for AI responses, and what remains outside scope.
+              </p>
+            </div>
+
+            <section class="scope-card scope-card-emphasis">
+              <div class="scope-card-head">
+                <h4>Scope Controls</h4>
+                <p id="scopeInventorySummary" class="mode-description">
+                  All indexed documents are currently available for retrieval.
+                </p>
+              </div>
+              <div class="scope-action-row">
+                <button id="applyContextButton" class="primary-button" type="button">Apply scope</button>
+                <button id="browserUseAllButton" class="secondary-button compact-button" type="button">
+                  Use all docs
+                </button>
+              </div>
+              <div class="scope-status-grid">
+                <div class="scope-status-card">
+                  <span class="field-label">Applied now</span>
+                  <p id="scopeAppliedSummary" class="scope-status-copy">
+                    All indexed documents are currently available for retrieval.
+                  </p>
+                </div>
+                <div class="scope-status-card">
+                  <span class="field-label">Draft in browser</span>
+                  <p id="scopeDraftSummary" class="scope-status-copy">
+                    All indexed documents are currently selected in this browser view.
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            <section class="scope-card">
+              <div class="scope-card-head">
+                <h4>Included In Scope</h4>
+                <p class="mode-description">
+                  These explicit folders or documents will shape the retrieval context.
+                </p>
+              </div>
+              <div id="scopeIncludedList" class="scope-item-list"></div>
+            </section>
+
+            <section class="scope-card">
+              <div class="scope-card-head">
+                <h4>Outside Scope</h4>
+                <p class="mode-description">
+                  A quick view of folders still excluded from the active draft scope.
+                </p>
+              </div>
+              <div id="scopeExcludedList" class="scope-item-list scope-item-list-muted"></div>
+            </section>
+
+            <section class="selection-card">
+              <div class="selection-card-head">
+                <h3>Delete Selection</h3>
+                <p id="deleteSelectionSummary" class="mode-description">
+                  No documents selected for deletion.
+                </p>
+              </div>
+              <div id="deleteChipList" class="context-chip-list"></div>
+              <button id="deleteSelectedButton" class="danger-button library-danger-button" type="button">
+                Delete selected
+              </button>
+            </section>
+
+            <section class="upload-card import-menu-card">
+              <div class="upload-card-head">
+                <h3>Add to library</h3>
+                <p class="mode-description">
+                  Import supported text, Word, and Excel files or entire folders from your local filesystem, including Dropbox-synced folders.
+                </p>
+              </div>
+              <div class="library-import-menu">
+                <button id="selectUploadFilesButton" class="library-import-action" type="button">
+                  <span class="library-import-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M6 2.75h8l4 4V21.25H6z"></path>
+                      <path d="M14 2.75v4h4M12 17V10M9.5 12.5 12 10l2.5 2.5"></path>
+                    </svg>
+                  </span>
+                  <span class="library-import-copy">
+                    <strong>Upload file</strong>
+                    <small>TXT, MD, RST, CSV, JSON, HTML, LOG, DOCX/DOCM, XLSX/XLSM/XLTX/XLTM</small>
+                  </span>
+                  <span class="library-import-chevron" aria-hidden="true">&gt;</span>
+                </button>
+                <button id="selectUploadDirectoryButton" class="library-import-action" type="button">
+                  <span class="library-import-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M3 6.5h7l2 2h9v11H3z"></path>
+                      <path d="M12 17v-6M9.5 13.5 12 11l2.5 2.5"></path>
+                    </svg>
+                  </span>
+                  <span class="library-import-copy">
+                    <strong>Upload folder</strong>
+                    <small>Import supported files and preserve their nested folder structure</small>
+                  </span>
+                  <span class="library-import-chevron" aria-hidden="true">&gt;</span>
+                </button>
+                <button id="syncFolderActionButton" class="library-import-action" type="button">
+                  <span class="library-import-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                      <path d="M3 6.5h7l2 2h9v11H3z"></path>
+                      <path d="M8.5 14a3.5 3.5 0 0 1 6-2.45M15.5 14a3.5 3.5 0 0 1-6 2.45"></path>
+                      <path d="m14.5 9.75.25 2.25-2.25.25M9.5 18.25 9.25 16l2.25-.25"></path>
+                    </svg>
+                  </span>
+                  <span class="library-import-copy">
+                    <strong>Synchronize folder</strong>
+                    <small>Monitor a local or Dropbox folder and embed only new or changed files</small>
+                  </span>
+                  <span class="library-import-chevron" aria-hidden="true">&gt;</span>
+                </button>
+              </div>
+
+              <form id="uploadForm" class="upload-form upload-details is-hidden">
+                <input
+                  id="uploadFileInput"
+                  name="file"
+                  type="file"
+                  accept=".txt,.text,.md,.markdown,.rst,.csv,.json,.html,.htm,.log,.docx,.docm,.xlsx,.xlsm,.xltx,.xltm"
+                  multiple
+                  class="upload-directory-input"
+                >
+                <input
+                  id="uploadDirectoryInput"
+                  name="directory"
+                  type="file"
+                  accept=".txt,.text,.md,.markdown,.rst,.csv,.json,.html,.htm,.log,.docx,.docm,.xlsx,.xlsm,.xltx,.xltm"
+                  webkitdirectory
+                  directory
+                  multiple
+                  class="upload-directory-input"
+                >
+
+                <div class="field-grid">
+                  <label class="field" for="uploadCategoryInput">
+                    <span class="field-label">Category</span>
+                    <input id="uploadCategoryInput" name="category" type="text" value="uploaded" maxlength="120">
+                  </label>
+
+                  <label class="field" for="uploadFolderInput">
+                    <span class="field-label">Folder path</span>
+                    <input id="uploadFolderInput" name="folder" type="text" value="uploaded" maxlength="240">
+                  </label>
+                </div>
+
+                <input id="uploadTitleInput" name="title" type="hidden">
+
+                <label class="field" for="uploadTagsInput">
+                  <span class="field-label">Tags</span>
+                  <input id="uploadTagsInput" name="tags" type="text" maxlength="200" placeholder="billing, onboarding, support">
+                </label>
+
+                <div class="upload-actions">
+                  <p id="uploadStatus" class="upload-status">
+                    Choose files to configure this import.
+                  </p>
+                  <div class="upload-action-buttons">
+                    <button id="uploadButton" class="primary-button" type="submit">Import to library</button>
+                  </div>
+                </div>
+              </form>
+            </section>
+
+          </section>
+
+          <section class="browser-library">
+            <div class="browser-library-header">
+              <div>
+                <p class="eyebrow">Explorer</p>
+                <h3>Document Library</h3>
+                <p class="mode-description">
+                  Compact file navigation inspired by Obsidian, with preview and metadata editing kept nearby.
+                </p>
+              </div>
+              <button id="librarySyncAllButton" class="library-sync-all-button" type="button" disabled>
+                Sync all
+              </button>
+            </div>
+            <p id="libraryActionStatus" class="library-action-status">
+              Browse the library, adjust scope, or select a file to edit its metadata.
+            </p>
+            <div class="explorer-toolbar">
+              <div class="explorer-toolbar-buttons">
+                <button id="explorerRootButton" class="explorer-icon-button" type="button" aria-label="Show all documents" title="Show all documents">
+                  ⌂
+                </button>
+                <button id="explorerExpandAllButton" class="explorer-icon-button" type="button" aria-label="Expand all folders" title="Expand all folders">
+                  +
+                </button>
+                <button id="explorerCollapseAllButton" class="explorer-icon-button" type="button" aria-label="Collapse all folders" title="Collapse all folders">
+                  −
+                </button>
+                <button id="explorerRevealSelectionButton" class="explorer-icon-button" type="button" aria-label="Reveal selected document" title="Reveal selected document">
+                  ◎
+                </button>
+              </div>
+              <label class="library-search library-search-compact" for="librarySearchInput">
+                <input
+                  id="librarySearchInput"
+                  name="librarySearch"
+                  type="text"
+                  maxlength="160"
+                  placeholder="Filter files"
+                >
+              </label>
+            </div>
+            <div class="browser-library-tools">
+              <div id="libraryBreadcrumbs" class="library-breadcrumbs"></div>
+              <div class="explorer-tools-copy">
+                Compact nested folders and files. Select an item to preview or edit it.
+              </div>
+            </div>
+
+            <div class="explorer-workspace">
+              <section class="explorer-surface">
+                <div class="explorer-surface-head">
+                  <h4>Library</h4>
+                  <p class="mode-description">
+                    Nested folders and files
+                  </p>
+                </div>
+                <div id="folderTreeList" class="folder-tree-list"></div>
+              </section>
+            <section class="document-editor-card">
+              <div id="documentEditorEmpty" class="document-editor-empty">
+                Select a folder to inspect its properties, or select a document to edit its metadata.
+              </div>
+              <article id="folderPropertiesCard" class="folder-properties-card is-hidden">
+                <div class="document-editor-head">
+                  <div>
+                    <p class="eyebrow">Folder Properties</p>
+                    <h4 id="folderPropertiesTitle">Selected folder</h4>
+                    <p id="folderPropertiesKind" class="mode-description">Library folder</p>
+                  </div>
+                  <button id="closeFolderPropertiesButton" class="explorer-icon-button document-editor-close-button" type="button" aria-label="Close folder properties" title="Close folder properties">
+                    &times;
+                  </button>
+                </div>
+                <dl class="folder-property-list">
+                  <div class="folder-property-row">
+                    <dt>Library path</dt>
+                    <dd id="folderPropertiesPath"></dd>
+                  </div>
+                  <div id="folderPropertiesAliasRow" class="folder-property-row folder-property-alias-row is-hidden">
+                    <dt><label for="folderPropertiesAliasInput">Display alias</label></dt>
+                    <dd>
+                      <input id="folderPropertiesAliasInput" type="text" maxlength="160" placeholder="Defaults to the library folder name">
+                    </dd>
+                  </div>
+                  <div id="folderPropertiesSourceRow" class="folder-property-row is-hidden">
+                    <dt>Source path</dt>
+                    <dd id="folderPropertiesSource"></dd>
+                  </div>
+                  <div class="folder-property-row">
+                    <dt>Documents</dt>
+                    <dd id="folderPropertiesDocumentCount"></dd>
+                  </div>
+                  <div class="folder-property-row">
+                    <dt>Category</dt>
+                    <dd id="folderPropertiesCategory"></dd>
+                  </div>
+                  <div id="folderPropertiesScheduleRow" class="folder-property-row is-hidden">
+                    <dt>Synchronization</dt>
+                    <dd id="folderPropertiesSchedule"></dd>
+                  </div>
+                </dl>
+                <div id="folderPropertiesWatchSettings" class="folder-watch-settings is-hidden">
+                  <div class="field-grid">
+                    <label class="field" for="folderPropertiesIntervalInput">
+                      <span class="field-label">Interval minutes</span>
+                      <input id="folderPropertiesIntervalInput" type="number" min="1" max="1440" value="30">
+                    </label>
+                    <label class="field" for="folderPropertiesCategoryInput">
+                      <span class="field-label">Category</span>
+                      <input id="folderPropertiesCategoryInput" type="text" maxlength="120" value="watched">
+                    </label>
+                  </div>
+                  <label class="field" for="folderPropertiesTagsInput">
+                    <span class="field-label">Tags</span>
+                    <input id="folderPropertiesTagsInput" type="text" maxlength="500" placeholder="dropbox, field-report">
+                  </label>
+                  <div class="folder-watch-toggles">
+                    <label class="watch-checkbox">
+                      <input id="folderPropertiesRecursiveInput" type="checkbox" checked>
+                      Include nested folders
+                    </label>
+                    <label class="watch-checkbox">
+                      <input id="folderPropertiesEnabledInput" type="checkbox" checked>
+                      Automatic synchronization enabled
+                    </label>
+                  </div>
+                </div>
+                <div class="folder-property-tags-section">
+                  <span class="field-label">Tags</span>
+                  <div id="folderPropertiesTags" class="folder-property-tags"></div>
+                </div>
+                <div class="folder-property-actions">
+                  <button id="renameSelectedFolderButton" class="secondary-button compact-button" type="button">Rename folder</button>
+                  <button id="syncSelectedFolderButton" class="primary-button compact-button is-hidden" type="button">Sync now</button>
+                </div>
+              </article>
+              <form id="documentEditorForm" class="document-editor-form is-hidden">
+                <div class="document-editor-head">
+                  <div>
+                    <p class="eyebrow">Metadata Editor</p>
+                    <h4>Update Selected File</h4>
+                    <p id="documentEditorId" class="mode-description">
+                      Hidden document ID
+                    </p>
+                  </div>
+                  <div class="document-editor-actions">
+                    <button id="saveDocumentChangesButton" class="primary-button" type="submit">
+                      Save changes
+                    </button>
+                    <button
+                      id="closeDocumentEditorButton"
+                      class="explorer-icon-button document-editor-close-button"
+                      type="button"
+                      aria-label="Close metadata editor"
+                      title="Close metadata editor"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+
+                <div class="field-grid">
+                  <label class="field" for="documentEditorTitleInput">
+                    <span class="field-label">Title</span>
+                    <input id="documentEditorTitleInput" name="documentTitle" type="text" maxlength="160" required>
+                  </label>
+
+                  <label class="field" for="documentEditorCategoryInput">
+                    <span class="field-label">Category</span>
+                    <input id="documentEditorCategoryInput" name="documentCategory" type="text" maxlength="120" required>
+                  </label>
+                </div>
+
+                <label class="field" for="documentEditorFolderInput">
+                  <span class="field-label">Folder path</span>
+                  <input
+                    id="documentEditorFolderInput"
+                    name="documentFolder"
+                    type="text"
+                    maxlength="240"
+                    placeholder="operations/onboarding"
+                    required
+                  >
+                </label>
+
+                <label class="field" for="documentEditorTagsInput">
+                  <span class="field-label">Tags</span>
+                  <input
+                    id="documentEditorTagsInput"
+                    name="documentTags"
+                    type="text"
+                    maxlength="400"
+                    placeholder="billing, onboarding, support"
+                  >
+                </label>
+
+                <p id="documentEditorStatus" class="document-editor-status">
+                  Change the folder path to move this file elsewhere in the explorer.
+                </p>
+              </form>
+            </section>
+            </div>
+          </section>
+
+          <section class="browser-preview">
+            <div id="previewEmpty" class="preview-empty">
+              Select a document to preview its indexed content and metadata.
+            </div>
+            <article id="previewCard" class="preview-card is-hidden">
+              <div id="previewBadges" class="preview-badges"></div>
+              <h3 id="previewTitle"></h3>
+              <div id="previewSummary" class="preview-summary"></div>
+              <div id="previewMeta" class="preview-meta-line"></div>
+              <div id="previewText" class="preview-text"></div>
+            </article>
+          </section>
+        </div>
+      </div>
+      <div id="explorerContextMenu" class="explorer-context-menu is-hidden" aria-hidden="true">
+        <button id="explorerContextNewFolderButton" class="explorer-context-menu-item" type="button">
+          New folder
+        </button>
+        <button id="explorerContextRenameButton" class="explorer-context-menu-item" type="button">
+          Rename
+        </button>
+        <button id="explorerContextDeleteButton" class="explorer-context-menu-item explorer-context-menu-item-danger" type="button">
+          Delete
+        </button>
+      </div>
+    </div>
+
+    <script src="{{APP_JS_URL}}" defer></script>
+  </body>
+</html>
