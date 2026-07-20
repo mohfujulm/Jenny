@@ -220,6 +220,7 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
   ".log",
   ".markdown",
   ".md",
+  ".pdf",
   ".rst",
   ".text",
   ".txt",
@@ -231,6 +232,7 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
 const BINARY_UPLOAD_EXTENSIONS = new Set([
   ".docm",
   ".docx",
+  ".pdf",
   ".xlsm",
   ".xlsx",
   ".xltm",

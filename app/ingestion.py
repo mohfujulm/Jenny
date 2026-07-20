@@ -16,6 +16,9 @@ from typing import Any, Literal
 from xml.etree import ElementTree as ET
 import zipfile
 
+from pypdf import PdfReader
+from pypdf.errors import PyPdfError
+
 from app.config import Settings
 from app.datastore import (
     DocumentRecord,
@@ -54,7 +57,13 @@ SPREADSHEET_UPLOAD_SUFFIXES = {
     ".xltm",
     ".xltx",
 }
-SUPPORTED_UPLOAD_SUFFIXES = TEXT_UPLOAD_SUFFIXES | WORD_UPLOAD_SUFFIXES | SPREADSHEET_UPLOAD_SUFFIXES
+PDF_UPLOAD_SUFFIXES = {".pdf"}
+SUPPORTED_UPLOAD_SUFFIXES = (
+    TEXT_UPLOAD_SUFFIXES
+    | WORD_UPLOAD_SUFFIXES
+    | SPREADSHEET_UPLOAD_SUFFIXES
+    | PDF_UPLOAD_SUFFIXES
+)
 STRUCTURED_JSON_FIELDS = {"title", "category", "summary", "text"}
 WHITESPACE_RE = re.compile(r"\s+")
 WORDPROCESSING_MAIN_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -1113,6 +1122,14 @@ class DocumentIngestionService:
                 content_bytes=self._decode_base64_content(content_base64, filename=filename),
             )
 
+        if suffix in PDF_UPLOAD_SUFFIXES:
+            if content_text and content_text.strip():
+                return content_text.lstrip("\ufeff").strip()
+            return self._extract_pdf_document_text(
+                filename=filename,
+                content_bytes=self._decode_base64_content(content_base64, filename=filename),
+            )
+
         if content_text is None:
             raise ValueError(f"Uploaded file `{filename}` did not include text content.")
         return content_text.lstrip("\ufeff").strip()
@@ -1126,6 +1143,41 @@ class DocumentIngestionService:
             return base64.b64decode(normalized, validate=True)
         except (ValueError, binascii.Error) as exc:
             raise ValueError(f"Uploaded file `{filename}` contained invalid binary content.") from exc
+
+    def _extract_pdf_document_text(self, *, filename: str, content_bytes: bytes) -> str:
+        try:
+            reader = PdfReader(io.BytesIO(content_bytes))
+        except (PyPdfError, EOFError, OSError, ValueError) as exc:
+            raise ValueError(f"Uploaded file `{filename}` is not a valid PDF document.") from exc
+
+        if reader.is_encrypted:
+            try:
+                unlocked = bool(reader.decrypt(""))
+            except (PyPdfError, NotImplementedError, ValueError):
+                unlocked = False
+            if not unlocked:
+                raise ValueError(
+                    f"Uploaded PDF `{filename}` is password-protected. Remove the password before uploading."
+                )
+
+        sections: list[str] = []
+        for page_number, page in enumerate(reader.pages, start=1):
+            try:
+                page_text = (page.extract_text() or "").strip()
+            except (PyPdfError, KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Could not extract text from page {page_number} of `{filename}`."
+                ) from exc
+            if page_text:
+                sections.append(f"Page {page_number}\n{page_text}")
+
+        combined = "\n\n".join(sections).strip()
+        if not combined:
+            raise ValueError(
+                f"Uploaded PDF `{filename}` contains no extractable text. "
+                "Image-only PDFs require OCR before uploading."
+            )
+        return combined
 
     def _extract_word_document_text(self, *, filename: str, content_bytes: bytes) -> str:
         try:
