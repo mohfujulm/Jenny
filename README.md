@@ -1,4 +1,4 @@
-# Team Knowledge Agent
+# Jenny
 
 This project is a small-business MVP for a ChatGPT-style internal application backed by a private document datastore. The current scaffold uses:
 
