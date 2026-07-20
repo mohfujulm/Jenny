@@ -12,6 +12,7 @@ from uuid import uuid4
 from app.config import Settings
 from app.datastore import load_json_documents, normalize_folder_path
 from app.ingestion import (
+    PDF_UPLOAD_SUFFIXES,
     SPREADSHEET_UPLOAD_SUFFIXES,
     SUPPORTED_UPLOAD_SUFFIXES,
     WORD_UPLOAD_SUFFIXES,
@@ -19,7 +20,9 @@ from app.ingestion import (
 )
 
 
-BINARY_WATCH_SUFFIXES = WORD_UPLOAD_SUFFIXES | SPREADSHEET_UPLOAD_SUFFIXES
+BINARY_WATCH_SUFFIXES = (
+    WORD_UPLOAD_SUFFIXES | SPREADSHEET_UPLOAD_SUFFIXES | PDF_UPLOAD_SUFFIXES
+)
 
 
 LibraryChangedCallback = Callable[[], None]
