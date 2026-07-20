@@ -120,7 +120,7 @@ The UI now lets users:
 
 - Browse the indexed documents that are available to retrieval
 - Preview the embedded source text and metadata for a document
-- Upload new text, Word, Excel, and structured JSON source documents into the local corpus
+- Upload new text, PDF, Word, Excel, and structured JSON source documents into the local corpus
 - Add watched local folders, such as Dropbox project subfolders, that sync into the embedded library
 - Select and delete embedded documents from the local corpus
 - Restrict chat retrieval to selected folders and/or selected document IDs
@@ -128,7 +128,8 @@ The UI now lets users:
 Upload behavior:
 
 - The upload form lives inside the document browser
-- Supported direct file types are `.txt`, `.md`, `.rst`, `.csv`, `.html`, `.log`, Word `.docx`/`.docm`, Excel `.xlsx`/`.xlsm`/`.xltx`/`.xltm`, and structured `.json`
+- Supported direct file types are `.txt`, `.md`, `.rst`, `.csv`, `.html`, `.log`, text-based `.pdf`, Word `.docx`/`.docm`, Excel `.xlsx`/`.xlsm`/`.xltx`/`.xltm`, and structured `.json`
+- PDF ingestion preserves page boundaries in the searchable text; encrypted PDFs must be unlocked, and image-only PDFs require OCR before upload
 - Structured `.json` uploads can contain one document object or an array of document objects using the same schema as `app/data/sample_documents.json`
 - In `semantic` mode, each upload automatically rebuilds the semantic index so the new document is immediately searchable
 - In `json` mode, the source corpus is updated without embedding
