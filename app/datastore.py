@@ -104,9 +104,21 @@ def strip_folder_auto_tags(raw_tags: Any, folder_id: str) -> list[str]:
     ]
 
 
-def build_effective_document_tags(raw_tags: Any, folder_id: str) -> tuple[list[str], list[str]]:
-    manual_tags = strip_folder_auto_tags(raw_tags, folder_id)
-    auto_tags = build_folder_auto_tags(folder_id)
+def build_effective_document_tags(
+    raw_tags: Any,
+    folder_id: str,
+    additional_auto_tags: Any = None,
+) -> tuple[list[str], list[str]]:
+    folder_auto_tags = build_folder_auto_tags(folder_id)
+    auto_tags = normalize_tag_values(
+        [*folder_auto_tags, *normalize_tag_values(additional_auto_tags)]
+    )
+    auto_tag_keys = {tag.lower() for tag in auto_tags}
+    manual_tags = [
+        tag
+        for tag in normalize_tag_values(raw_tags)
+        if tag.lower() not in auto_tag_keys
+    ]
     return normalize_tag_values([*manual_tags, *auto_tags]), auto_tags
 
 
@@ -350,7 +362,11 @@ def _load_json_documents_from_path(path: Path) -> list[DocumentRecord]:
     documents: list[DocumentRecord] = []
     for item in raw_documents:
         folder = _normalized_folder(item)
-        tags, auto_tags = build_effective_document_tags(item.get("tags", []), folder)
+        tags, auto_tags = build_effective_document_tags(
+            item.get("tags", []),
+            folder,
+            item.get("auto_tags", []),
+        )
         documents.append(
             DocumentRecord(
                 document_id=item["document_id"],
@@ -388,6 +404,8 @@ def _document_record_to_json(document: DocumentRecord) -> dict[str, Any]:
         payload["upload_key"] = document.upload_key
     if document.content_hash:
         payload["content_hash"] = document.content_hash
+    if document.auto_tags:
+        payload["auto_tags"] = document.auto_tags
     return payload
 
 

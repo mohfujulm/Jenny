@@ -82,6 +82,29 @@ If you are actively editing code and want auto-reload, use:
 
 If you want the older lexical fallback instead, set `DOCSTORE_BACKEND=json`.
 
+## Portable Docker setup
+
+Docker packages the application and its OCR runtime together. Copy `.env.example` to `.env`, add your OpenAI key, and run:
+
+```powershell
+docker compose up --build
+```
+
+Open `http://127.0.0.1:8000`. The default image installs Tesseract and its English language data automatically. Application data and generated files persist in the `app-data` and `app-outputs` Docker volumes.
+
+To build the pip-installable RapidOCR variant instead, set this in `.env` before building:
+
+```text
+PDF_OCR_ENGINE=rapidocr
+```
+
+Rebuild after changing engines:
+
+```powershell
+docker compose build --no-cache
+docker compose up
+```
+
 ## Wiring this to your team server
 
 ## Local semantic retrieval
@@ -128,24 +151,80 @@ The UI now lets users:
 Upload behavior:
 
 - The upload form lives inside the document browser
-- Supported direct file types are `.txt`, `.md`, `.rst`, `.csv`, `.html`, `.log`, text-based `.pdf`, Word `.docx`/`.docm`, Excel `.xlsx`/`.xlsm`/`.xltx`/`.xltm`, and structured `.json`
-- PDF ingestion preserves page boundaries in the searchable text; encrypted PDFs must be unlocked, and image-only PDFs require OCR before upload
+- Supported direct file types are `.txt`, `.md`, `.rst`, `.csv`, `.html`, `.log`, `.pdf`, Word `.docx`/`.docm`, Excel `.xlsx`/`.xlsm`/`.xltx`/`.xltm`, and structured `.json`
+- PDF ingestion preserves page boundaries and automatically OCRs scanned or image-only pages; encrypted PDFs must be unlocked before upload
 - Structured `.json` uploads can contain one document object or an array of document objects using the same schema as `app/data/sample_documents.json`
 - In `semantic` mode, each upload automatically rebuilds the semantic index so the new document is immediately searchable
 - In `json` mode, the source corpus is updated without embedding
 - Deleting documents from a local `semantic` library also rebuilds the embedding index
 - Upload and delete mutations are only available for local `json` and `semantic` backends
 
+### PDF OCR setup
+
+PDF rendering is installed through `requirements.txt`. OCR providers are interchangeable and selected with `PDF_OCR_ENGINE`.
+
+The default `tesseract` provider requires the Tesseract command-line program and the language data used by your documents. Docker installs both automatically. For a native installation, install Tesseract on the application server, make sure `tesseract` is on `PATH`, and restart the app. If it is installed elsewhere, set `PDF_OCR_TESSERACT_CMD` to the full executable path.
+
+The optional `rapidocr` provider installs through pip and includes its default English/Chinese small models. For a native installation, run:
+
+```powershell
+pip install -r requirements-rapidocr.txt
+```
+
+Then set `PDF_OCR_ENGINE=rapidocr`. RapidOCR does not use `PDF_OCR_LANGUAGE` or `PDF_OCR_TESSERACT_CMD`; use the Tesseract provider when you need the configured Tesseract language packs.
+
+OCR is applied per page only when the page has little or no embedded text, which preserves good native text while supporting mixed digital/scanned PDFs. Configure it with:
+
+```text
+PDF_OCR_ENABLED=true
+PDF_OCR_ENGINE=tesseract
+PDF_OCR_LANGUAGE=eng
+PDF_OCR_DPI=300
+PDF_OCR_MIN_NATIVE_TEXT_CHARS=40
+PDF_OCR_TIMEOUT_SECONDS=60
+PDF_OCR_TESSERACT_CMD=tesseract
+PDF_MAX_PAGES=500
+```
+
+Use Tesseract language codes such as `eng` or a combination such as `eng+spa`. Set `PDF_OCR_ENABLED=false` only if this deployment must reject image-only pages instead of running OCR.
+
+`PDF_MAX_PAGES` bounds the work performed by a single upload. Increase it deliberately for unusually large document sets.
+
+The local startup script checks the configured OCR runtime and warns when it is unavailable. `/api/health` also reports the selected provider and whether its dependencies are present.
+
 Watched Dropbox folder behavior:
 
 - Add watched folders from the document browser by entering a local project root path and an optional subfolder such as `Field Reports`
 - If no library folder override is supplied, files import under `Project Folder Name / Monitored Subfolder`
+- Project paths under a numbered `Projects` folder automatically populate structured workflow tags from the Dropbox hierarchy
 - The app scans watched folders on the configured interval and can also force-sync one folder or all folders from the UI
 - The watcher stores its configuration in `WATCHED_FOLDERS_PATH`, defaulting to `app/data/watched_folders.json`
 - The scheduler wakes every `WATCHED_FOLDER_POLL_SECONDS`, defaulting to `60`
 - Already embedded files are skipped by watched-folder upload key
 - Changed files are updated in place and only changed/new documents are re-embedded
 - Watched-folder upload keys are scoped by watcher and relative file path so repeated Dropbox project structures do not overwrite each other
+
+### Watched-folder path tags
+
+The watcher understands the team's numbered Dropbox project layout. For example:
+
+```text
+\Vasquez Integrators Dropbox\01. Project Delivery\00. Projects\43. PANYNJ - EWR Innomotics VMSS\Working Moh\Project Notes\meeting.md
+```
+
+produces:
+
+```text
+workflow:project
+project-number:43
+project:PANYNJ - EWR Innomotics VMSS
+client:PANYNJ
+site:EWR
+owner:Moh
+workstream:Project Notes
+```
+
+Tags configured on the watcher are also treated as watcher-managed auto tags. Tags added manually to an individual library document are preserved when the source file changes or resyncs. If the path or watcher tags change, obsolete watcher-managed tags are replaced. Existing synchronized documents are backfilled on their next sync even when their file contents have not changed.
 
 Scope behavior:
 

@@ -16,6 +16,11 @@ if (-not (Test-Path $python)) {
     Write-Error "Virtual environment not found at .venv. Create it first with: python -m venv .venv"
 }
 
+& $python -m app.ocr
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "PDF OCR is not ready. The app will still start, but scanned PDFs will fail until the configured OCR engine is installed."
+}
+
 $args = @(
     "-m",
     "uvicorn",
