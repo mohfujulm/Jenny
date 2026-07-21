@@ -75,6 +75,14 @@ class Settings:
     semantic_chunk_size_words: int
     semantic_chunk_overlap_words: int
     semantic_embedding_batch_size: int
+    pdf_ocr_enabled: bool = True
+    pdf_ocr_engine: str = "tesseract"
+    pdf_ocr_language: str = "eng"
+    pdf_ocr_dpi: int = 300
+    pdf_ocr_min_native_text_chars: int = 40
+    pdf_ocr_timeout_seconds: int = 60
+    pdf_ocr_tesseract_cmd: str = "tesseract"
+    pdf_max_pages: int = 500
 
 
 @lru_cache(maxsize=1)
@@ -93,6 +101,17 @@ def get_settings() -> Settings:
         docstore_folders_path=ROOT_DIR / os.getenv("DOCSTORE_FOLDERS_PATH", "app/data/library_folders.json"),
         watched_folders_path=ROOT_DIR / os.getenv("WATCHED_FOLDERS_PATH", "app/data/watched_folders.json"),
         watched_folder_poll_seconds=_to_int(os.getenv("WATCHED_FOLDER_POLL_SECONDS"), 60),
+        pdf_ocr_enabled=_to_bool(os.getenv("PDF_OCR_ENABLED"), True),
+        pdf_ocr_engine=os.getenv("PDF_OCR_ENGINE", "tesseract").strip().lower() or "tesseract",
+        pdf_ocr_language=os.getenv("PDF_OCR_LANGUAGE", "eng").strip() or "eng",
+        pdf_ocr_dpi=_to_int(os.getenv("PDF_OCR_DPI"), 300),
+        pdf_ocr_min_native_text_chars=_to_int(
+            os.getenv("PDF_OCR_MIN_NATIVE_TEXT_CHARS"),
+            40,
+        ),
+        pdf_ocr_timeout_seconds=_to_int(os.getenv("PDF_OCR_TIMEOUT_SECONDS"), 60),
+        pdf_ocr_tesseract_cmd=os.getenv("PDF_OCR_TESSERACT_CMD", "tesseract").strip() or "tesseract",
+        pdf_max_pages=_to_int(os.getenv("PDF_MAX_PAGES"), 500),
         docstore_base_url=os.getenv("DOCSTORE_BASE_URL", "http://localhost:8081").rstrip("/"),
         docstore_api_key=os.getenv("DOCSTORE_API_KEY"),
         docstore_timeout_seconds=_to_int(os.getenv("DOCSTORE_TIMEOUT_SECONDS"), 15),

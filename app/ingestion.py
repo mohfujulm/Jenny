@@ -20,6 +20,7 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 from app.config import Settings
+from app.ocr import OcrProvider, create_ocr_provider
 from app.datastore import (
     DocumentRecord,
     build_effective_document_tags,
@@ -180,6 +181,7 @@ class DocumentIngestionService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._lock = threading.Lock()
+        self._ocr_provider: OcrProvider | None = None
 
     def ingest_upload(
         self,
@@ -228,6 +230,7 @@ class DocumentIngestionService:
                 category=category,
                 folder=folder,
                 tags=tags or [],
+                source_auto_tags=[],
             )
             if not parsed_documents:
                 raise ValueError("The uploaded file did not produce any documents.")
@@ -312,6 +315,7 @@ class DocumentIngestionService:
                     category=upload.get("category"),
                     folder=upload.get("folder"),
                     tags=upload.get("tags") or [],
+                    source_auto_tags=upload.get("source_auto_tags") or [],
                 )
                 if not next_documents:
                     continue
@@ -450,9 +454,14 @@ class DocumentIngestionService:
                 raise ValueError(f"Document ID `{normalized_document_id}` was not found.")
 
             current_document = existing_documents[target_index]
+            normalized_tags = self._strip_document_auto_tags(
+                normalized_tags,
+                current_document,
+            )
             next_tags, next_auto_tags = self._build_document_tags(
                 tags=normalized_tags,
                 folder=current_document.folder,
+                source_auto_tags=self._source_auto_tags_from_document(current_document),
             )
             if current_document.tags == next_tags:
                 return TagUpdateOutcome(
@@ -535,15 +544,14 @@ class DocumentIngestionService:
                 raise ValueError(f"Document ID `{normalized_document_id}` was not found.")
 
             current_document = existing_documents[target_index]
-            normalized_tags = self._normalize_tags(
-                self._manual_tags_for_folder(
-                    raw_tags=tags or [],
-                    folder=current_document.folder,
-                )
+            normalized_tags = self._strip_document_auto_tags(
+                tags or [],
+                current_document,
             )
             next_tags, next_auto_tags = self._build_document_tags(
                 tags=normalized_tags,
                 folder=normalized_folder,
+                source_auto_tags=self._source_auto_tags_from_document(current_document),
             )
             if (
                 current_document.title == normalized_title
@@ -680,6 +688,7 @@ class DocumentIngestionService:
                 next_tags, next_auto_tags = self._build_document_tags(
                     tags=self._manual_tags_from_document(current_document),
                     folder=next_folder,
+                    source_auto_tags=self._source_auto_tags_from_document(current_document),
                 )
                 updated_documents[index] = DocumentRecord(
                     document_id=current_document.document_id,
@@ -949,6 +958,7 @@ class DocumentIngestionService:
                 next_tags, next_auto_tags = self._build_document_tags(
                     tags=self._manual_tags_from_document(current_document),
                     folder=next_folder,
+                    source_auto_tags=self._source_auto_tags_from_document(current_document),
                 )
                 updated_documents[index] = DocumentRecord(
                     document_id=current_document.document_id,
@@ -1027,6 +1037,7 @@ class DocumentIngestionService:
         category: str | None,
         folder: str | None,
         tags: list[str],
+        source_auto_tags: list[str],
     ) -> list[DocumentRecord]:
         suffix = Path(filename).suffix.lower()
         decoded_text = self._extract_upload_text(
@@ -1048,6 +1059,7 @@ class DocumentIngestionService:
                 raw_text=decoded_text,
                 existing_ids=existing_ids,
                 upload_key_base=resolved_upload_key_base,
+                source_auto_tags=source_auto_tags,
             )
             if structured_documents is not None:
                 return structured_documents
@@ -1064,6 +1076,7 @@ class DocumentIngestionService:
         effective_tags, auto_tags = self._build_document_tags(
             tags=normalized_tags,
             folder=normalized_folder,
+            source_auto_tags=source_auto_tags,
         )
         summary = self._summarize(decoded_text)
         upload_key = self._build_upload_key(
@@ -1123,8 +1136,6 @@ class DocumentIngestionService:
             )
 
         if suffix in PDF_UPLOAD_SUFFIXES:
-            if content_text and content_text.strip():
-                return content_text.lstrip("\ufeff").strip()
             return self._extract_pdf_document_text(
                 filename=filename,
                 content_bytes=self._decode_base64_content(content_base64, filename=filename),
@@ -1160,7 +1171,22 @@ class DocumentIngestionService:
                     f"Uploaded PDF `{filename}` is password-protected. Remove the password before uploading."
                 )
 
-        sections: list[str] = []
+        page_count = len(reader.pages)
+        if page_count == 0:
+            raise ValueError(f"Uploaded PDF `{filename}` does not contain any pages.")
+        maximum_pages = max(1, int(self._pdf_ocr_setting("pdf_max_pages", 500)))
+        if page_count > maximum_pages:
+            raise ValueError(
+                f"Uploaded PDF `{filename}` has {page_count} pages; the configured limit is "
+                f"{maximum_pages} pages."
+            )
+
+        page_text_by_number: dict[int, str] = {}
+        pages_requiring_ocr: list[int] = []
+        minimum_native_chars = max(
+            0,
+            int(self._pdf_ocr_setting("pdf_ocr_min_native_text_chars", 40)),
+        )
         for page_number, page in enumerate(reader.pages, start=1):
             try:
                 page_text = (page.extract_text() or "").strip()
@@ -1168,16 +1194,109 @@ class DocumentIngestionService:
                 raise ValueError(
                     f"Could not extract text from page {page_number} of `{filename}`."
                 ) from exc
-            if page_text:
-                sections.append(f"Page {page_number}\n{page_text}")
+
+            page_text_by_number[page_number] = page_text
+            native_character_count = len(WHITESPACE_RE.sub("", page_text))
+            if native_character_count < minimum_native_chars:
+                pages_requiring_ocr.append(page_number)
+
+        if pages_requiring_ocr:
+            if not bool(self._pdf_ocr_setting("pdf_ocr_enabled", True)):
+                if not any(page_text_by_number.values()):
+                    raise ValueError(
+                        f"Uploaded PDF `{filename}` contains no extractable text. "
+                        "Image-only PDFs require OCR, but PDF OCR is disabled."
+                    )
+            else:
+                ocr_text_by_number = self._ocr_pdf_pages(
+                    filename=filename,
+                    content_bytes=content_bytes,
+                    page_numbers=pages_requiring_ocr,
+                )
+                for page_number, ocr_text in ocr_text_by_number.items():
+                    if ocr_text.strip():
+                        page_text_by_number[page_number] = ocr_text.strip()
+
+        sections = [
+            f"Page {page_number}\n{page_text}"
+            for page_number, page_text in page_text_by_number.items()
+            if page_text
+        ]
 
         combined = "\n\n".join(sections).strip()
         if not combined:
             raise ValueError(
                 f"Uploaded PDF `{filename}` contains no extractable text. "
-                "Image-only PDFs require OCR before uploading."
+                "OCR ran but did not recognize any text."
             )
         return combined
+
+    def _ocr_pdf_pages(
+        self,
+        *,
+        filename: str,
+        content_bytes: bytes,
+        page_numbers: list[int],
+    ) -> dict[int, str]:
+        try:
+            import pypdfium2 as pdfium
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF OCR requires the `pypdfium2` package. Install the project requirements and retry."
+            ) from exc
+
+        dpi = min(600, max(72, int(self._pdf_ocr_setting("pdf_ocr_dpi", 300))))
+        provider = self._get_ocr_provider()
+
+        try:
+            document = pdfium.PdfDocument(content_bytes)
+        except Exception as exc:
+            raise ValueError(f"Uploaded file `{filename}` could not be rendered for OCR.") from exc
+
+        extracted: dict[int, str] = {}
+        try:
+            for page_number in page_numbers:
+                page = None
+                bitmap = None
+                image = None
+                try:
+                    page = document[page_number - 1]
+                    bitmap = page.render(scale=dpi / 72)
+                    image = bitmap.to_pil()
+                    image.info["dpi"] = (dpi, dpi)
+                    extracted[page_number] = provider.recognize(
+                        image,
+                        filename=filename,
+                        page_number=page_number,
+                    )
+                except RuntimeError:
+                    raise
+                except Exception as exc:
+                    raise ValueError(
+                        f"Could not render page {page_number} of `{filename}` for OCR."
+                    ) from exc
+                finally:
+                    if image is not None:
+                        image.close()
+                    if bitmap is not None:
+                        bitmap.close()
+                    if page is not None:
+                        page.close()
+        finally:
+            document.close()
+
+        return extracted
+
+    def _get_ocr_provider(self) -> OcrProvider:
+        provider = getattr(self, "_ocr_provider", None)
+        if provider is None:
+            provider = create_ocr_provider(self._settings)
+            self._ocr_provider = provider
+        return provider
+
+    def _pdf_ocr_setting(self, name: str, default: Any) -> Any:
+        settings = getattr(self, "_settings", None)
+        return getattr(settings, name, default)
 
     def _extract_word_document_text(self, *, filename: str, content_bytes: bytes) -> str:
         try:
@@ -1413,6 +1532,7 @@ class DocumentIngestionService:
         raw_text: str,
         existing_ids: set[str],
         upload_key_base: str | None,
+        source_auto_tags: list[str],
     ) -> list[DocumentRecord] | None:
         try:
             payload = json.loads(raw_text)
@@ -1459,6 +1579,7 @@ class DocumentIngestionService:
             effective_tags, auto_tags = self._build_document_tags(
                 tags=tags,
                 folder=folder,
+                source_auto_tags=source_auto_tags,
             )
             summary = str(item.get("summary") or "").strip() or self._summarize(normalized_text)
             upload_key = self._build_structured_upload_key(
@@ -2012,10 +2133,37 @@ class DocumentIngestionService:
         return strip_folder_auto_tags(raw_tags, folder)
 
     def _manual_tags_from_document(self, document: DocumentRecord) -> list[str]:
-        return self._manual_tags_for_folder(raw_tags=document.tags, folder=document.folder)
+        return self._strip_document_auto_tags(document.tags, document)
 
-    def _build_document_tags(self, *, tags: Any, folder: str) -> tuple[list[str], list[str]]:
-        return build_effective_document_tags(tags, folder)
+    def _source_auto_tags_from_document(self, document: DocumentRecord) -> list[str]:
+        folder_auto_tags = build_effective_document_tags([], document.folder)[1]
+        folder_auto_keys = {tag.lower() for tag in folder_auto_tags}
+        return [
+            tag
+            for tag in normalize_tag_values(document.auto_tags)
+            if tag.lower() not in folder_auto_keys
+        ]
+
+    def _strip_document_auto_tags(
+        self,
+        raw_tags: Any,
+        document: DocumentRecord,
+    ) -> list[str]:
+        auto_tag_keys = {tag.lower() for tag in document.auto_tags}
+        return [
+            tag
+            for tag in normalize_tag_values(raw_tags)
+            if tag.lower() not in auto_tag_keys
+        ]
+
+    def _build_document_tags(
+        self,
+        *,
+        tags: Any,
+        folder: str,
+        source_auto_tags: Any = None,
+    ) -> tuple[list[str], list[str]]:
+        return build_effective_document_tags(tags, folder, source_auto_tags)
 
     def _optional_text(self, value: Any) -> str | None:
         if value is None:

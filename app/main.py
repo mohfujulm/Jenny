@@ -61,6 +61,7 @@ from app.models import (
     WatchedFolderUpdateResponse,
 )
 from app.openai_agent import BusinessKnowledgeAgent, SessionManager
+from app.ocr import get_ocr_runtime_status
 
 
 settings = get_settings()
@@ -234,6 +235,7 @@ def health() -> dict[str, object]:
         "model": settings.openai_model,
         "docstore_backend": settings.docstore_backend,
         "openai_configured": bool(settings.openai_api_key),
+        "pdf_ocr": get_ocr_runtime_status(settings),
     }
 
 

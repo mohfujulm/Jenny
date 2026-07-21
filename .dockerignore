@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+*.sqlite
+app/data
+outputs
+work
+tag-update-test-*

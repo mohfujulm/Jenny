@@ -10,7 +10,13 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from app.config import Settings
-from app.datastore import load_json_documents, normalize_folder_path
+from app.datastore import (
+    DocumentRecord,
+    build_folder_auto_tags,
+    load_json_documents,
+    normalize_folder_path,
+    normalize_tag_values,
+)
 from app.ingestion import (
     PDF_UPLOAD_SUFFIXES,
     SPREADSHEET_UPLOAD_SUFFIXES,
@@ -18,6 +24,7 @@ from app.ingestion import (
     WORD_UPLOAD_SUFFIXES,
     DocumentIngestionService,
 )
+from app.path_tags import infer_watched_path_tags
 
 
 BINARY_WATCH_SUFFIXES = (
@@ -78,6 +85,7 @@ class PendingWatchedFile:
     relative_path: str
     upload_key_base: str
     target_document_id: str | None = None
+    existing_manual_tags: list[str] = field(default_factory=list)
 
 
 class WatchedFolderService:
@@ -389,13 +397,13 @@ class WatchedFolderService:
             for document in existing_documents
             if document.upload_key
         }
-        existing_document_id_by_watch_path: dict[str, str] = {}
+        existing_document_by_watch_path: dict[str, DocumentRecord] = {}
         for document in existing_documents:
             if not document.upload_key:
                 continue
             watch_path_key = self._watch_path_key_from_upload_key(document.upload_key)
             if watch_path_key:
-                existing_document_id_by_watch_path[watch_path_key] = document.document_id
+                existing_document_by_watch_path[watch_path_key] = document
 
         pending_files: list[PendingWatchedFile] = []
         scanned_count = 0
@@ -409,20 +417,37 @@ class WatchedFolderService:
                 modified_ms=int(path.stat().st_mtime * 1000),
             )
             upload_key = f"upload:{upload_key_base}"
-            if upload_key in existing_upload_keys:
-                skipped_count += 1
-                continue
-
             watch_path_key = self._build_watch_path_key(
                 watch_id=record.watch_id,
                 relative_path=relative_path,
             )
+            existing_document = existing_document_by_watch_path.get(watch_path_key)
+            expected_source_auto_tags = self._build_watched_auto_tags(record, path)
+            source_tags_are_current = (
+                existing_document is not None
+                and self._tags_match(
+                    self._source_auto_tags(existing_document),
+                    expected_source_auto_tags,
+                )
+            )
+            if upload_key in existing_upload_keys and source_tags_are_current:
+                skipped_count += 1
+                continue
+
             pending_files.append(
                 PendingWatchedFile(
                     path=path,
                     relative_path=relative_path,
                     upload_key_base=upload_key_base,
-                    target_document_id=existing_document_id_by_watch_path.get(watch_path_key),
+                    target_document_id=(
+                        existing_document.document_id
+                        if existing_document is not None
+                        else None
+                    ),
+                    existing_manual_tags=self._existing_manual_tags(
+                        existing_document,
+                        watcher_tags=record.tags,
+                    ),
                 )
             )
 
@@ -450,7 +475,8 @@ class WatchedFolderService:
             "source_url": path.resolve().as_uri(),
             "category": record.category,
             "folder": target_folder,
-            "tags": record.tags,
+            "tags": pending_file.existing_manual_tags,
+            "source_auto_tags": self._build_watched_auto_tags(record, path),
             "similarity_policy": "replace",
         }
         if pending_file.target_document_id:
@@ -461,6 +487,43 @@ class WatchedFolderService:
         else:
             upload["content_text"] = path.read_text(encoding="utf-8", errors="ignore")
         return upload
+
+    def _build_watched_auto_tags(
+        self,
+        record: WatchedFolderRecord,
+        path: Path,
+    ) -> list[str]:
+        return normalize_tag_values([*record.tags, *infer_watched_path_tags(path)])
+
+    def _source_auto_tags(self, document: DocumentRecord) -> list[str]:
+        folder_auto_keys = {
+            tag.lower() for tag in build_folder_auto_tags(document.folder)
+        }
+        return [
+            tag
+            for tag in normalize_tag_values(document.auto_tags)
+            if tag.lower() not in folder_auto_keys
+        ]
+
+    def _existing_manual_tags(
+        self,
+        document: DocumentRecord | None,
+        *,
+        watcher_tags: list[str],
+    ) -> list[str]:
+        if document is None:
+            return []
+        auto_tag_keys = {tag.lower() for tag in document.auto_tags}
+        watcher_tag_keys = {tag.lower() for tag in watcher_tags}
+        return [
+            tag
+            for tag in normalize_tag_values(document.tags)
+            if tag.lower() not in auto_tag_keys
+            and tag.lower() not in watcher_tag_keys
+        ]
+
+    def _tags_match(self, left: list[str], right: list[str]) -> bool:
+        return {tag.lower() for tag in left} == {tag.lower() for tag in right}
 
     def _persist_sync_result(self, result: WatchSyncResult) -> None:
         with self._lock:

@@ -1,0 +1,20 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        OCR_ENGINE: ${PDF_OCR_ENGINE:-tesseract}
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PDF_OCR_ENGINE: ${PDF_OCR_ENGINE:-tesseract}
+    volumes:
+      - app-data:/app/app/data
+      - app-outputs:/app/outputs
+    restart: unless-stopped
+
+volumes:
+  app-data:
+  app-outputs:
