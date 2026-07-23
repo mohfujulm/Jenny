@@ -24,6 +24,8 @@ from app.models import (
     ConversationListResponse,
     ConversationSaveRequest,
     ConversationSaveResponse,
+    ConversationSettingsRequest,
+    ConversationSettingsResponse,
     DocumentDeleteRequest,
     DocumentDeleteResponse,
     DocumentDetailResponse,
@@ -375,7 +377,10 @@ def delete_watched_folder(watch_id: str) -> WatchedFolderDeleteResponse:
     return WatchedFolderDeleteResponse(
         watch_id=watch_id,
         deleted=True,
-        message="Watched folder removed. Existing embedded documents were not deleted.",
+        message=(
+            "Folder path unsynchronized. Existing embedded documents and source files "
+            "were not deleted."
+        ),
     )
 
 
@@ -422,6 +427,8 @@ def save_conversation(request: ConversationSaveRequest) -> ConversationSaveRespo
         conversation = session_manager.save_conversation(
             request.conversation_id,
             title=request.title,
+            source_mode=request.source_mode,
+            context_filter=request.context_filter,
         )
         return ConversationSaveResponse(
             conversation=conversation,
@@ -435,6 +442,34 @@ def save_conversation(request: ConversationSaveRequest) -> ConversationSaveRespo
         raise HTTPException(
             status_code=500,
             detail="Unexpected server error while saving the conversation.",
+        ) from exc
+
+
+@app.post("/api/conversations/settings", response_model=ConversationSettingsResponse)
+def update_conversation_settings(
+    request: ConversationSettingsRequest,
+) -> ConversationSettingsResponse:
+    try:
+        conversation = session_manager.update_conversation_settings(
+            request.conversation_id,
+            request.source_mode,
+            request.context_filter,
+        )
+        return ConversationSettingsResponse(
+            conversation_id=request.conversation_id,
+            source_mode=request.source_mode,
+            context_filter=request.context_filter,
+            saved=conversation is not None,
+            conversation=conversation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Unexpected server error while updating conversation settings.",
         ) from exc
 
 
@@ -807,18 +842,35 @@ def create_folder(request: FolderCreateRequest) -> FolderCreateResponse:
 @app.post("/api/folders/delete", response_model=FolderDeleteResponse)
 def delete_folder(request: FolderDeleteRequest) -> FolderDeleteResponse:
     try:
-        outcome = ingestion_service.delete_folder(
-            folder_id=request.folder_id,
+        (
+            outcome,
+            unsynchronized_folders,
+        ) = watch_folder_service.delete_library_folder_and_unsynchronize(
+            request.folder_id,
         )
         _invalidate_document_store_cache()
+        unsynchronized_count = len(unsynchronized_folders)
+        message = outcome.message
+        if unsynchronized_count:
+            message = (
+                f"{message} Unsynchronized {unsynchronized_count} source "
+                f"folder{'s' if unsynchronized_count != 1 else ''}."
+            )
         return FolderDeleteResponse(
             folder_id=outcome.folder_id,
             deleted_document_ids=outcome.deleted_document_ids,
             removed_folder_ids=outcome.removed_folder_ids,
+            unsynchronized_watch_ids=[
+                item["watch_id"] for item in unsynchronized_folders
+            ],
+            unsynchronized_source_paths=[
+                item["source_path"] for item in unsynchronized_folders
+            ],
             total_deleted_documents=len(outcome.deleted_document_ids),
             total_removed_folders=len(outcome.removed_folder_ids),
+            total_unsynchronized_folders=unsynchronized_count,
             semantic_index_rebuilt=outcome.semantic_index_rebuilt,
-            message=outcome.message,
+            message=message,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

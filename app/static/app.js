@@ -7,13 +7,17 @@ const modeCopy = {
   },
   broader: {
     description:
-      "Still checks internal documents, but can supplement with broader model knowledge when useful.",
+      "Still checks internal documents, and can search the public web for current broader context.",
     composerNote:
-      "Uses internal docs when relevant, but can add broader background that is not from your datastore.",
+      "Uses internal docs when relevant and visibly cites public web sources when it searches.",
     intro:
-      "Ask for internal policy answers or broader explainers. In this mode, the assistant can combine internal sources with general background when helpful.",
+      "Ask for internal answers, current public information, or broader explainers. The assistant can combine internal sources with cited web research when helpful.",
   },
 };
+
+const CHAT_PREFERENCES_STORAGE_KEY = "business-knowledge-chat-preferences-v1";
+const MAX_STORED_CHAT_PREFERENCES = 100;
+const conversationPreferenceSyncTimers = new Map();
 
 const state = {
   conversationId: crypto.randomUUID(),
@@ -50,6 +54,7 @@ const state = {
     activeFolderId: null,
     searchQuery: "",
     collapsedFolderIds: [],
+    collapseFoldersOnLoad: false,
     dragPayload: null,
     previewDocumentId: null,
     previewCache: {},
@@ -205,6 +210,12 @@ const watchFolderStatus = document.getElementById("watchFolderStatus");
 const watchFolderList = document.getElementById("watchFolderList");
 const addWatchFolderButton = document.getElementById("addWatchFolderButton");
 const syncAllWatchFoldersButton = document.getElementById("syncAllWatchFoldersButton");
+const openSynchronizedPathsButton = document.getElementById("openSynchronizedPathsButton");
+const synchronizedPathsCount = document.getElementById("synchronizedPathsCount");
+const synchronizedPathsMenu = document.getElementById("synchronizedPathsMenu");
+const synchronizedPathsSummary = document.getElementById("synchronizedPathsSummary");
+const closeSynchronizedPathsButton = document.getElementById("closeSynchronizedPathsButton");
+const addSynchronizedPathButton = document.getElementById("addSynchronizedPathButton");
 const explorerContextMenu = document.getElementById("explorerContextMenu");
 const explorerContextNewFolderButton = document.getElementById("explorerContextNewFolderButton");
 const explorerContextRenameButton = document.getElementById("explorerContextRenameButton");
@@ -328,9 +339,15 @@ function readFileAsBase64(file) {
       const commaIndex = payload.indexOf(",");
       resolve(commaIndex >= 0 ? payload.slice(commaIndex + 1) : payload);
     };
-    reader.onerror = () => {
-      reject(new Error(`Failed to read ${file && file.name ? file.name : "file"}.`));
+    const rejectUnreadableFile = () => {
+      const filename = file && file.name ? file.name : "file";
+      reject(new Error(
+        `Failed to read ${filename}. If it is an online-only Dropbox, OneDrive, or other cloud file, ` +
+        "start the sync client and make the file available offline before retrying."
+      ));
     };
+    reader.onerror = rejectUnreadableFile;
+    reader.onabort = rejectUnreadableFile;
     reader.readAsDataURL(file);
   });
 }
@@ -557,6 +574,167 @@ function cloneContextFilter(filter) {
   };
 }
 
+function normalizeConversationPreferences(preferences) {
+  const contextFilter = preferences && preferences.contextFilter
+    ? preferences.contextFilter
+    : {};
+  return {
+    sourceMode: preferences && preferences.sourceMode === "broader" ? "broader" : "internal",
+    contextFilter: {
+      folderIds: normalizeItems(
+        (Array.isArray(contextFilter.folderIds) ? contextFilter.folderIds : [])
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      ),
+      documentIds: normalizeItems(
+        (Array.isArray(contextFilter.documentIds) ? contextFilter.documentIds : [])
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      ),
+    },
+    updatedAt: Number(preferences && preferences.updatedAt) || 0,
+  };
+}
+
+function readConversationPreferenceStore() {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(CHAT_PREFERENCES_STORAGE_KEY) || "null");
+    if (!payload || typeof payload !== "object") {
+      return { lastUsed: null, conversations: {} };
+    }
+    return {
+      lastUsed: payload.lastUsed ? normalizeConversationPreferences(payload.lastUsed) : null,
+      conversations:
+        payload.conversations && typeof payload.conversations === "object"
+          ? payload.conversations
+          : {},
+    };
+  } catch {
+    return { lastUsed: null, conversations: {} };
+  }
+}
+
+function writeConversationPreferenceStore(store) {
+  try {
+    const conversations = Object.fromEntries(
+      Object.entries(store.conversations || {})
+        .map(([conversationId, preferences]) => [
+          conversationId,
+          normalizeConversationPreferences(preferences),
+        ])
+        .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+        .slice(0, MAX_STORED_CHAT_PREFERENCES)
+    );
+    window.localStorage.setItem(
+      CHAT_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        lastUsed: store.lastUsed
+          ? normalizeConversationPreferences(store.lastUsed)
+          : null,
+        conversations,
+      })
+    );
+  } catch {
+    // Browser storage can be unavailable. Saved chats still persist settings on the server.
+  }
+}
+
+function getCurrentConversationPreferences() {
+  return normalizeConversationPreferences({
+    sourceMode: state.sourceMode,
+    contextFilter: state.library.appliedContext,
+  });
+}
+
+function rememberConversationPreferences(conversationId, preferences = getCurrentConversationPreferences()) {
+  if (!conversationId) {
+    return normalizeConversationPreferences(preferences);
+  }
+  const store = readConversationPreferenceStore();
+  const normalized = {
+    ...normalizeConversationPreferences(preferences),
+    updatedAt: Date.now(),
+  };
+  store.lastUsed = normalized;
+  store.conversations[conversationId] = normalized;
+  writeConversationPreferenceStore(store);
+  return normalized;
+}
+
+function getLastUsedConversationPreferences() {
+  const store = readConversationPreferenceStore();
+  return normalizeConversationPreferences(store.lastUsed || {});
+}
+
+function resolveSavedConversationPreferences(payload) {
+  const serverPreferences = normalizeConversationPreferences({
+    sourceMode: payload.source_mode,
+    contextFilter: {
+      folderIds: payload.context_filter?.folder_ids || [],
+      documentIds: payload.context_filter?.document_ids || [],
+    },
+    updatedAt: Date.parse(payload.updated_at || "") || 0,
+  });
+  const stored = readConversationPreferenceStore().conversations[payload.conversation_id];
+  const localPreferences = stored ? normalizeConversationPreferences(stored) : null;
+  return localPreferences && localPreferences.updatedAt > serverPreferences.updatedAt
+    ? localPreferences
+    : serverPreferences;
+}
+
+function forgetConversationPreferences(conversationId) {
+  const store = readConversationPreferenceStore();
+  delete store.conversations[conversationId];
+  writeConversationPreferenceStore(store);
+}
+
+async function syncConversationPreferences(conversationId, preferences) {
+  try {
+    const normalized = normalizeConversationPreferences(preferences);
+    const response = await fetch("/api/conversations/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        source_mode: normalized.sourceMode,
+        context_filter: {
+          folder_ids: normalized.contextFilter.folderIds,
+          document_ids: normalized.contextFilter.documentIds,
+        },
+      }),
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      const detail = payload && payload.detail ? payload.detail : "Chat settings update failed";
+      throw new Error(detail);
+    }
+    if (payload && payload.conversation) {
+      upsertSavedConversationSummary(buildConversationSummary(payload.conversation));
+      renderSavedConversationList();
+    }
+  } catch (error) {
+    if (conversationId === state.conversationId) {
+      setConversationMemoryStatus(`Chat settings sync failed: ${error.message}`, "error");
+    }
+  }
+}
+
+function persistActiveConversationPreferences() {
+  const conversationId = state.conversationId;
+  const preferences = rememberConversationPreferences(conversationId);
+  const existingTimer = conversationPreferenceSyncTimers.get(conversationId);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+  const timer = window.setTimeout(() => {
+    conversationPreferenceSyncTimers.delete(conversationId);
+    void syncConversationPreferences(conversationId, preferences);
+  }, 200);
+  conversationPreferenceSyncTimers.set(conversationId, timer);
+}
+
 function contextFiltersEqual(left, right) {
   return (
     normalizeItems(left.folderIds).join("|") === normalizeItems(right.folderIds).join("|") &&
@@ -684,6 +862,20 @@ function getWatchedFolderForLibraryFolder(folderId) {
   return state.library.watchFolders.find(
     (watchFolder) => getResolvedWatchedLibraryFolder(watchFolder) === normalizedFolderId
   ) || null;
+}
+
+function getWatchedFoldersWithinLibraryFolder(folderId) {
+  const normalizedFolderId = normalizeFolderPath(folderId);
+  if (!normalizedFolderId) {
+    return [];
+  }
+  return state.library.watchFolders.filter((watchFolder) => {
+    const watchedLibraryFolder = getResolvedWatchedLibraryFolder(watchFolder);
+    return (
+      watchedLibraryFolder === normalizedFolderId ||
+      watchedLibraryFolder.startsWith(`${normalizedFolderId}/`)
+    );
+  });
 }
 
 function getFolderDisplayName(folderId, fallbackName = "") {
@@ -1031,14 +1223,6 @@ function getFolderTreeNodes() {
   return root;
 }
 
-function hasFolderDescendants(pathId) {
-  const normalizedPathId = normalizeFolderPath(pathId);
-  return state.library.folders.some((folderSummary) => {
-    const folderPathId = normalizeFolderPath(folderSummary.folder_id);
-    return folderPathId === normalizedPathId || folderPathId.startsWith(`${normalizedPathId}/`);
-  });
-}
-
 function isFolderCollapsed(pathId) {
   return state.library.collapsedFolderIds.includes(pathId);
 }
@@ -1054,15 +1238,17 @@ function toggleFolderCollapsed(pathId) {
   renderFolderTree();
 }
 
+function getAllLibraryFolderPathIds() {
+  return normalizeItems(
+    state.library.folders.map((item) => normalizeFolderPath(item.folder_id)).filter(Boolean)
+  );
+}
+
 function setAllFoldersCollapsed(isCollapsed) {
   if (!isCollapsed) {
     state.library.collapsedFolderIds = [];
   } else {
-    state.library.collapsedFolderIds = normalizeItems(
-      state.library.folders
-        .map((item) => normalizeFolderPath(item.folder_id))
-        .filter((folderId) => folderId && hasFolderDescendants(folderId))
-    );
+    state.library.collapsedFolderIds = getAllLibraryFolderPathIds();
   }
   renderFolderTree();
 }
@@ -1519,6 +1705,19 @@ function renderMessage(message, options = {}) {
     citationList.className = "citation-list";
 
     normalized.citations.forEach((citation) => {
+      const isWebCitation = citation.category === "web" && /^https?:\/\//i.test(citation.source_url || "");
+      if (isWebCitation) {
+        const target = document.createElement("a");
+        target.className = "citation citation-link";
+        target.href = citation.source_url;
+        target.target = "_blank";
+        target.rel = "noopener noreferrer";
+        target.textContent = citation.title || citation.source_url;
+        target.title = `Open web source: ${citation.title || citation.source_url}`;
+        citationList.appendChild(target);
+        return;
+      }
+
       const target = document.createElement("button");
       target.type = "button";
       target.className = "citation citation-button";
@@ -1535,7 +1734,9 @@ function renderMessage(message, options = {}) {
   }
 
   messageList.appendChild(node);
-  messageList.scrollTop = messageList.scrollHeight;
+  if (options.scrollToLatest !== false) {
+    messageList.scrollTop = messageList.scrollHeight;
+  }
   renderConversationSaveButton();
 }
 
@@ -1646,6 +1847,8 @@ function setWatchFolderState(isInFlight) {
     syncAllWatchFoldersButton,
     librarySyncAllButton,
     syncFolderActionButton,
+    addSynchronizedPathButton,
+    openSynchronizedPathsButton,
   ].forEach((element) => {
     if (element) {
       element.disabled = isInFlight;
@@ -1695,7 +1898,38 @@ function formatWatchFolderTimestamp(timestamp) {
   });
 }
 
+function openSynchronizedPathsMenu() {
+  if (!synchronizedPathsMenu) {
+    return;
+  }
+  if (!state.library.watchFoldersLoaded && !state.library.watchFoldersLoadError) {
+    void loadWatchedFolders();
+  }
+  renderWatchFolderList();
+  synchronizedPathsMenu.classList.remove("is-hidden");
+  synchronizedPathsMenu.setAttribute("aria-hidden", "false");
+}
+
+function closeSynchronizedPathsMenu() {
+  if (!synchronizedPathsMenu) {
+    return;
+  }
+  synchronizedPathsMenu.classList.add("is-hidden");
+  synchronizedPathsMenu.setAttribute("aria-hidden", "true");
+}
+
 function renderWatchFolderList() {
+  const watchFolderCount = state.library.watchFolders.length;
+  if (synchronizedPathsCount) {
+    synchronizedPathsCount.textContent = state.library.watchFoldersLoaded
+      ? String(watchFolderCount)
+      : "...";
+  }
+  if (synchronizedPathsSummary) {
+    synchronizedPathsSummary.textContent = state.library.watchFoldersLoaded
+      ? `${watchFolderCount} source folder${watchFolderCount === 1 ? "" : "s"} configured for synchronization.`
+      : "Loading synchronized paths...";
+  }
   if (librarySyncAllButton) {
     librarySyncAllButton.disabled =
       state.library.watchFolderInFlight ||
@@ -1726,7 +1960,7 @@ function renderWatchFolderList() {
   if (state.library.watchFolders.length === 0) {
     const empty = document.createElement("p");
     empty.className = "watch-folder-empty";
-    empty.textContent = "No watched folders configured yet.";
+    empty.textContent = "No synchronized folder paths are configured.";
     watchFolderList.appendChild(empty);
     return;
   }
@@ -1734,7 +1968,10 @@ function renderWatchFolderList() {
   state.library.watchFolders.forEach((watchFolder) => {
     const item = document.createElement("article");
     item.className = "watch-folder-item";
-    item.classList.toggle("is-error", watchFolder.last_status === "error");
+    item.classList.toggle(
+      "is-error",
+      watchFolder.last_status === "error" || Number(watchFolder.last_error_count || 0) > 0
+    );
 
     const body = document.createElement("div");
     body.className = "watch-folder-body";
@@ -1770,7 +2007,8 @@ function renderWatchFolderList() {
       `${watchFolder.last_scanned_count || 0} scanned - ` +
       `${watchFolder.last_created_count || 0} new - ` +
       `${watchFolder.last_updated_count || 0} updated - ` +
-      `${watchFolder.last_skipped_count || 0} skipped`;
+      `${watchFolder.last_skipped_count || 0} skipped - ` +
+      `${watchFolder.last_error_count || 0} errors`;
     body.appendChild(stats);
 
     const actions = document.createElement("div");
@@ -1782,6 +2020,7 @@ function renderWatchFolderList() {
     aliasButton.disabled = state.library.watchFolderInFlight;
     aliasButton.textContent = "Alias";
     aliasButton.addEventListener("click", () => {
+      closeSynchronizedPathsMenu();
       beginWatchedFolderAliasEdit(watchFolder);
     });
     actions.appendChild(aliasButton);
@@ -1800,7 +2039,7 @@ function renderWatchFolderList() {
     deleteButton.type = "button";
     deleteButton.className = "danger-button compact-danger-button";
     deleteButton.disabled = state.library.watchFolderInFlight;
-    deleteButton.textContent = "Remove";
+    deleteButton.textContent = "Unsynchronize";
     deleteButton.addEventListener("click", async () => {
       await deleteWatchedFolder(watchFolder.watch_id);
     });
@@ -2248,11 +2487,18 @@ async function deleteWatchedFolder(watchId) {
   if (!watchId || state.library.watchFolderInFlight) {
     return;
   }
-  if (!window.confirm("Remove this watched folder? Existing embedded documents will remain in the library.")) {
+  const watchedFolder = state.library.watchFolders.find(
+    (item) => item.watch_id === watchId
+  );
+  const sourcePath = watchedFolder?.source_path || "this source folder";
+  if (!window.confirm(
+    `Unsynchronize ${sourcePath}? Existing embedded documents will remain in the library, ` +
+    "and the source folder on disk will not be deleted."
+  )) {
     return;
   }
   setWatchFolderState(true);
-  setWatchFolderStatus("Removing watched folder...");
+  setWatchFolderStatus("Unsynchronizing folder path...");
   try {
     const response = await fetch(`/api/watch-folders/${encodeURIComponent(watchId)}`, {
       method: "DELETE",
@@ -2262,7 +2508,7 @@ async function deleteWatchedFolder(watchId) {
       throw new Error(getErrorMessageFromPayload(payload, "Remove watched folder failed"));
     }
     await loadWatchedFolders();
-    setWatchFolderStatus(payload.message || "Watched folder removed.", "success");
+    setWatchFolderStatus(payload.message || "Folder path unsynchronized.", "success");
   } catch (error) {
     setWatchFolderStatus(error.message, "error");
   } finally {
@@ -2862,6 +3108,12 @@ function applySourceMode(sourceMode) {
   composerNote.textContent = modeCopy[sourceMode].composerNote;
 }
 
+function applyConversationPreferences(preferences) {
+  const normalized = normalizeConversationPreferences(preferences);
+  applySourceMode(normalized.sourceMode);
+  applyContextSelection(normalized.contextFilter);
+}
+
 function renderIntroMessage() {
   renderMessage(
     {
@@ -2869,8 +3121,9 @@ function renderIntroMessage() {
       label: "Assistant",
       body: buildIntroMessage(),
     },
-    { persist: false }
+    { persist: false, scrollToLatest: false }
   );
+  messageList.scrollTop = 0;
 }
 
 function renderConversationMessages(messages) {
@@ -2884,12 +3137,15 @@ function renderConversationMessages(messages) {
   }
 
   messages.forEach((message) => {
-    renderMessage(message);
+    renderMessage(message, { scrollToLatest: false });
   });
+  messageList.scrollTop = 0;
 }
 
 function resetConversation() {
   state.conversationId = crypto.randomUUID();
+  applyConversationPreferences(getLastUsedConversationPreferences());
+  rememberConversationPreferences(state.conversationId);
   renderConversationMessages([]);
   renderSavedConversationList();
   renderConversationSaveButton();
@@ -2938,14 +3194,14 @@ async function openSavedConversation(conversationId) {
 
     state.conversationId = payload.conversation_id;
     upsertSavedConversationSummary(buildConversationSummary(payload));
-    applySourceMode(payload.source_mode || "internal");
-    applyContextSelection(
-      {
-        folderIds: payload.context_filter?.folder_ids || [],
-        documentIds: payload.context_filter?.document_ids || [],
-      },
-      { resetConversationView: false }
-    );
+    const preferences = resolveSavedConversationPreferences(payload);
+    const serverUpdatedAt = Date.parse(payload.updated_at || "") || 0;
+    const shouldSyncLocalPreferences = preferences.updatedAt > serverUpdatedAt;
+    applyConversationPreferences(preferences);
+    const rememberedPreferences = rememberConversationPreferences(state.conversationId, preferences);
+    if (shouldSyncLocalPreferences) {
+      void syncConversationPreferences(state.conversationId, rememberedPreferences);
+    }
     renderConversationMessages(payload.messages || []);
     renderSavedConversationList();
     renderConversationSaveButton();
@@ -2953,7 +3209,6 @@ async function openSavedConversation(conversationId) {
       `Opened "${getSavedConversationDisplayLabel(buildConversationSummary(payload))}".`,
       "success"
     );
-    messageInput.focus();
   } catch (error) {
     setConversationMemoryStatus(`Open failed: ${error.message}`, "error");
   }
@@ -2989,6 +3244,11 @@ async function saveCurrentConversation(options = {}) {
       },
       body: JSON.stringify({
         conversation_id: state.conversationId,
+        source_mode: state.sourceMode,
+        context_filter: {
+          folder_ids: state.library.appliedContext.folderIds,
+          document_ids: state.library.appliedContext.documentIds,
+        },
       }),
     });
     const payload = await parseJsonResponse(response);
@@ -2999,6 +3259,7 @@ async function saveCurrentConversation(options = {}) {
 
     state.memory.loaded = true;
     state.memory.loadError = null;
+    rememberConversationPreferences(state.conversationId);
     upsertSavedConversationSummary(buildConversationSummary(payload.conversation));
     renderSavedConversationList();
     if (silent) {
@@ -3042,6 +3303,14 @@ async function deleteSavedConversation(conversationId) {
     state.memory.conversations = state.memory.conversations.filter(
       (item) => item.conversation_id !== conversationId
     );
+    const pendingPreferenceSync = conversationPreferenceSyncTimers.get(conversationId);
+    if (pendingPreferenceSync) {
+      window.clearTimeout(pendingPreferenceSync);
+      conversationPreferenceSyncTimers.delete(conversationId);
+    }
+    if (conversationId !== state.conversationId) {
+      forgetConversationPreferences(conversationId);
+    }
     renderSavedConversationList();
     renderConversationSaveButton();
     if (conversationId === state.conversationId) {
@@ -3081,11 +3350,16 @@ async function loadDocumentLibrary() {
     state.library.loaded = true;
     state.library.loadError = null;
     reconcileLibraryState();
+    if (state.library.collapseFoldersOnLoad) {
+      state.library.collapseFoldersOnLoad = false;
+      state.library.collapsedFolderIds = getAllLibraryFolderPathIds();
+    }
     renderContextSummary();
     renderBrowserStats();
     renderDeleteSelectionSummary();
     renderLibraryExplorer();
   } catch (error) {
+    state.library.collapseFoldersOnLoad = false;
     state.library.loadError = error.message;
     contextSummary.textContent = "Document library could not be loaded.";
     browserStats.textContent = `Library unavailable: ${error.message}`;
@@ -4345,10 +4619,17 @@ async function deleteFolderFromContext(folderId) {
 
   const folderLabel = formatFolderPath(folderId);
   const scopedDocumentIds = getFolderDocumentIds(folderId);
+  const synchronizedFolders = getWatchedFoldersWithinLibraryFolder(folderId);
   const docCount = scopedDocumentIds.length;
-  const confirmMessage = docCount
+  let confirmMessage = docCount
     ? `Delete folder ${folderLabel} and ${docCount} document${docCount === 1 ? "" : "s"} inside it?`
     : `Delete empty folder ${folderLabel}?`;
+  if (synchronizedFolders.length > 0) {
+    confirmMessage += (
+      ` This will also unsynchronize ${synchronizedFolders.length} source folder` +
+      `${synchronizedFolders.length === 1 ? "" : "s"}; source files on disk will not be deleted.`
+    );
+  }
   if (!window.confirm(confirmMessage)) {
     return;
   }
@@ -4379,6 +4660,7 @@ async function deleteFolderFromContext(folderId) {
     state.library.deleteSelectionIds = state.library.deleteSelectionIds.filter(
       (item) => !scopedDocumentIds.includes(item)
     );
+    await loadWatchedFolders();
     await loadDocumentLibrary();
     renderDeleteSelectionSummary();
     renderPreview();
@@ -4612,6 +4894,7 @@ function renderPreview() {
 
 function openDocumentBrowser() {
   if (!state.library.loaded && !state.library.loadError) {
+    state.library.collapseFoldersOnLoad = true;
     void loadDocumentLibrary();
   }
   if (!state.library.watchFoldersLoaded && !state.library.watchFoldersLoadError) {
@@ -4619,6 +4902,7 @@ function openDocumentBrowser() {
   }
   state.library.editorDismissed = false;
   closeExplorerContextMenu();
+  state.library.collapsedFolderIds = getAllLibraryFolderPathIds();
   state.library.draftContext = cloneContextFilter(state.library.appliedContext);
   renderBrowserStats();
   renderDeleteSelectionSummary();
@@ -4630,22 +4914,20 @@ function openDocumentBrowser() {
 
 function closeDocumentBrowser() {
   closeExplorerContextMenu();
+  closeSynchronizedPathsMenu();
   documentBrowser.classList.add("is-hidden");
   documentBrowser.setAttribute("aria-hidden", "true");
 }
 
-function applyContextSelection(nextContext, options = {}) {
-  const { resetConversationView = true } = options;
+function applyContextSelection(nextContext) {
   state.library.appliedContext = {
     folderIds: normalizeItems(nextContext.folderIds),
     documentIds: normalizeItems(nextContext.documentIds),
   };
+  state.library.draftContext = cloneContextFilter(state.library.appliedContext);
   renderContextSummary();
   renderBrowserStats();
   renderScopePane();
-  if (resetConversationView) {
-    resetConversation();
-  }
 }
 
 async function generateDocumentFromContext(event) {
@@ -4858,6 +5140,24 @@ if (syncAllWatchFoldersButton) {
   syncAllWatchFoldersButton.addEventListener("click", syncAllWatchedFolders);
 }
 
+if (openSynchronizedPathsButton) {
+  openSynchronizedPathsButton.addEventListener("click", openSynchronizedPathsMenu);
+}
+
+if (closeSynchronizedPathsButton) {
+  closeSynchronizedPathsButton.addEventListener("click", closeSynchronizedPathsMenu);
+}
+
+document.querySelectorAll("[data-close-synchronized-paths]").forEach((element) => {
+  element.addEventListener("click", closeSynchronizedPathsMenu);
+});
+
+if (addSynchronizedPathButton) {
+  addSynchronizedPathButton.addEventListener("click", async () => {
+    await selectAndCreateWatchedFolder();
+  });
+}
+
 if (librarySyncAllButton) {
   librarySyncAllButton.addEventListener("click", syncAllWatchedFolders);
 }
@@ -4920,8 +5220,12 @@ modeButtons.forEach((button) => {
       return;
     }
     applySourceMode(sourceMode);
-    resetConversation();
-    messageInput.focus();
+    persistActiveConversationPreferences();
+    const sourceModeLabel = sourceMode === "broader" ? "Broader view" : "Internal docs";
+    setConversationMemoryStatus(
+      `${sourceModeLabel} is now active and remembered for this conversation.`,
+      "success"
+    );
   });
 });
 
@@ -4945,7 +5249,8 @@ applyContextButton.addEventListener("click", () => {
   const changed = !contextFiltersEqual(nextContext, state.library.appliedContext);
   if (changed) {
     applyContextSelection(nextContext);
-    setLibraryActionStatus("Scope applied to the current conversation.", "success");
+    persistActiveConversationPreferences();
+    setLibraryActionStatus("Scope applied and remembered for the current conversation.", "success");
   } else {
     setLibraryActionStatus("Draft scope already matches the applied scope.");
   }
@@ -5110,6 +5415,7 @@ clearContextButton.addEventListener("click", () => {
     folderIds: [],
     documentIds: [],
   });
+  persistActiveConversationPreferences();
 });
 
 document.addEventListener("keydown", (event) => {
@@ -5120,6 +5426,11 @@ document.addEventListener("keydown", (event) => {
   }
 
   if (event.key === "Escape" && !documentBrowser.classList.contains("is-hidden")) {
+    if (synchronizedPathsMenu && !synchronizedPathsMenu.classList.contains("is-hidden")) {
+      event.preventDefault();
+      closeSynchronizedPathsMenu();
+      return;
+    }
     if (state.library.contextMenu.open) {
       event.preventDefault();
       closeExplorerContextMenu();

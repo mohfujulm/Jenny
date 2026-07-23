@@ -200,9 +200,12 @@ Watched Dropbox folder behavior:
 - The app scans watched folders on the configured interval and can also force-sync one folder or all folders from the UI
 - The watcher stores its configuration in `WATCHED_FOLDERS_PATH`, defaulting to `app/data/watched_folders.json`
 - The scheduler wakes every `WATCHED_FOLDER_POLL_SECONDS`, defaulting to `60`
+- The Document Library's **Synchronized paths** menu lists every monitored source path, its mapped library folder, schedule, last result, and management actions
 - Already embedded files are skipped by watched-folder upload key
 - Changed files are updated in place and only changed/new documents are re-embedded
+- Online-only Dropbox/OneDrive placeholders require the desktop sync client to be running and the files to be available offline; unavailable files are reported individually without blocking readable files in the same folder
 - Watched-folder upload keys are scoped by watcher and relative file path so repeated Dropbox project structures do not overwrite each other
+- Deleting a synchronized library folder also removes every watcher mapped to that folder or its descendants, preventing the folder from returning on the next scan; source files on disk are never deleted
 
 ### Watched-folder path tags
 
@@ -232,6 +235,7 @@ Scope behavior:
 - If folders are selected, all documents in those folders are eligible
 - If individual documents are selected, those specific documents are eligible
 - The active retrieval scope is the union of selected folders and selected documents
+- Each chat remembers its own Internal docs/Broader view mode and embedded-library scope; changing either setting keeps the current chat open, saved chats restore those choices, and new chats inherit the most recently used choices
 
 ## Wiring this to your team server
 

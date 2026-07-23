@@ -87,11 +87,27 @@ class ConversationListResponse(BaseModel):
 class ConversationSaveRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=160)
     title: str | None = Field(default=None, max_length=120)
+    source_mode: SourceMode | None = None
+    context_filter: ContextFilter | None = None
 
 
 class ConversationSaveResponse(BaseModel):
     conversation: SavedConversationDetail
     message: str
+
+
+class ConversationSettingsRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=160)
+    source_mode: SourceMode
+    context_filter: ContextFilter = Field(default_factory=ContextFilter)
+
+
+class ConversationSettingsResponse(BaseModel):
+    conversation_id: str
+    source_mode: SourceMode
+    context_filter: ContextFilter
+    saved: bool
+    conversation: SavedConversationDetail | None = None
 
 
 class ConversationDeleteResponse(BaseModel):
@@ -346,8 +362,11 @@ class FolderDeleteResponse(BaseModel):
     folder_id: str
     deleted_document_ids: list[str]
     removed_folder_ids: list[str]
+    unsynchronized_watch_ids: list[str] = Field(default_factory=list)
+    unsynchronized_source_paths: list[str] = Field(default_factory=list)
     total_deleted_documents: int
     total_removed_folders: int
+    total_unsynchronized_folders: int = 0
     semantic_index_rebuilt: bool
     message: str
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -150,6 +153,72 @@ class PdfIngestionTests(unittest.TestCase):
                 content_text="untrusted replacement text",
                 content_base64=None,
             )
+
+    def test_direct_pdf_upload_persists_extracted_text(self) -> None:
+        with TemporaryDirectory() as temp_directory:
+            temp_root = Path(temp_directory)
+            settings = SimpleNamespace(
+                docstore_backend="json",
+                docstore_json_path=temp_root / "documents.json",
+                docstore_folders_path=temp_root / "folders.json",
+                openai_api_key=None,
+                pdf_ocr_enabled=True,
+                pdf_ocr_engine="tesseract",
+                pdf_ocr_language="eng",
+                pdf_ocr_dpi=300,
+                pdf_ocr_min_native_text_chars=10,
+                pdf_ocr_timeout_seconds=60,
+                pdf_ocr_tesseract_cmd="tesseract",
+                pdf_max_pages=500,
+            )
+            settings.docstore_json_path.write_text("[]\n", encoding="utf-8")
+            settings.docstore_folders_path.write_text("[]\n", encoding="utf-8")
+            service = DocumentIngestionService(settings)
+
+            outcome = service.ingest_upload(
+                filename="field-report.pdf",
+                content_base64=base64.b64encode(
+                    build_pdf("Field report direct upload")
+                ).decode("ascii"),
+            )
+
+            self.assertEqual(outcome.created_count, 1)
+            self.assertIn("Field report direct upload", outcome.uploaded_documents[0].text)
+
+    def test_tolerant_batch_imports_valid_file_and_reports_invalid_pdf(self) -> None:
+        with TemporaryDirectory() as temp_directory:
+            temp_root = Path(temp_directory)
+            settings = SimpleNamespace(
+                docstore_backend="json",
+                docstore_json_path=temp_root / "documents.json",
+                docstore_folders_path=temp_root / "folders.json",
+                openai_api_key=None,
+                pdf_ocr_enabled=True,
+                pdf_ocr_min_native_text_chars=10,
+                pdf_max_pages=500,
+            )
+            settings.docstore_json_path.write_text("[]\n", encoding="utf-8")
+            settings.docstore_folders_path.write_text("[]\n", encoding="utf-8")
+            service = DocumentIngestionService(settings)
+
+            outcome = service.ingest_upload_batch(
+                uploads=[
+                    {"filename": "good.txt", "content_text": "Readable note"},
+                    {
+                        "filename": "broken.pdf",
+                        "content_base64": base64.b64encode(b"not a pdf").decode("ascii"),
+                    },
+                ],
+                continue_on_error=True,
+            )
+
+            self.assertEqual(outcome.created_count, 1)
+            self.assertEqual(
+                [document.title for document in outcome.uploaded_documents],
+                ["good.txt"],
+            )
+            self.assertEqual(len(outcome.failed_uploads), 1)
+            self.assertIn("broken.pdf", outcome.failed_uploads[0])
 
     def test_rejects_pdf_over_configured_page_limit(self) -> None:
         self.service._settings.pdf_max_pages = 1

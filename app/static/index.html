@@ -319,9 +319,15 @@
                   Compact file navigation inspired by Obsidian, with preview and metadata editing kept nearby.
                 </p>
               </div>
-              <button id="librarySyncAllButton" class="library-sync-all-button" type="button" disabled>
-                Sync all
-              </button>
+              <div class="browser-library-header-actions">
+                <button id="openSynchronizedPathsButton" class="secondary-button compact-button" type="button">
+                  Synchronized paths
+                  <span id="synchronizedPathsCount" class="synchronized-paths-count">...</span>
+                </button>
+                <button id="librarySyncAllButton" class="library-sync-all-button" type="button" disabled>
+                  Sync all
+                </button>
+              </div>
             </div>
             <p id="libraryActionStatus" class="library-action-status">
               Browse the library, adjust scope, or select a file to edit its metadata.
@@ -525,6 +531,56 @@
               <div id="previewMeta" class="preview-meta-line"></div>
               <div id="previewText" class="preview-text"></div>
             </article>
+          </section>
+        </div>
+        <div id="synchronizedPathsMenu" class="synchronized-paths-menu is-hidden" aria-hidden="true">
+          <button
+            class="synchronized-paths-backdrop"
+            type="button"
+            data-close-synchronized-paths
+            aria-label="Close synchronized paths"
+          ></button>
+          <section
+            class="synchronized-paths-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="synchronizedPathsTitle"
+          >
+            <header class="synchronized-paths-header">
+              <div>
+                <p class="eyebrow">Automatic synchronization</p>
+                <h3 id="synchronizedPathsTitle">Synchronized folder paths</h3>
+                <p class="mode-description">
+                  Every local or Dropbox source currently monitored by the embedded library.
+                </p>
+              </div>
+              <button
+                id="closeSynchronizedPathsButton"
+                class="explorer-icon-button"
+                type="button"
+                aria-label="Close synchronized paths"
+                title="Close"
+              >
+                &times;
+              </button>
+            </header>
+            <div class="synchronized-paths-toolbar">
+              <p id="synchronizedPathsSummary" class="mode-description">
+                Loading synchronized paths...
+              </p>
+              <div class="synchronized-paths-actions">
+                <button id="addSynchronizedPathButton" class="secondary-button compact-button" type="button">
+                  Add folder
+                </button>
+                <button id="syncAllWatchFoldersButton" class="primary-button compact-button" type="button">
+                  Sync all now
+                </button>
+              </div>
+            </div>
+            <p id="watchFolderStatus" class="library-action-status">
+              Source folders remain on disk when synchronization is removed.
+            </p>
+            <div id="watchFolderList" class="watch-folder-list synchronized-paths-list" aria-live="polite"></div>
           </section>
         </div>
       </div>
