@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import io
 from pathlib import Path
@@ -82,6 +82,7 @@ class UploadOutcome:
     updated_count: int = 0
     unchanged_count: int = 0
     ignored_count: int = 0
+    failed_uploads: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,7 @@ class DocumentIngestionService:
         self,
         *,
         uploads: list[dict[str, Any]],
+        continue_on_error: bool = False,
     ) -> UploadOutcome:
         if not uploads:
             raise ValueError("Select at least one document to upload.")
@@ -296,27 +298,37 @@ class DocumentIngestionService:
             parsed_documents: list[DocumentRecord] = []
             similarity_policies_by_upload_key: dict[str, UploadSimilarityPolicy] = {}
             similarity_target_document_ids_by_upload_key: dict[str, str] = {}
+            failed_uploads: list[str] = []
 
             for upload in uploads:
                 filename = str(upload.get("filename") or "").strip()
                 if not filename:
-                    raise ValueError("Uploaded file must have a filename.")
+                    if not continue_on_error:
+                        raise ValueError("Uploaded file must have a filename.")
+                    failed_uploads.append("Unnamed file: uploaded file must have a filename.")
+                    continue
 
-                next_documents = self._parse_upload(
-                    filename=filename,
-                    content_text=upload.get("content_text"),
-                    content_base64=upload.get("content_base64"),
-                    existing_ids=existing_ids,
-                    client_path=upload.get("client_path"),
-                    client_modified_ms=upload.get("client_modified_ms"),
-                    source_url=upload.get("source_url"),
-                    upload_key_base=upload.get("upload_key_base"),
-                    title=upload.get("title"),
-                    category=upload.get("category"),
-                    folder=upload.get("folder"),
-                    tags=upload.get("tags") or [],
-                    source_auto_tags=upload.get("source_auto_tags") or [],
-                )
+                try:
+                    next_documents = self._parse_upload(
+                        filename=filename,
+                        content_text=upload.get("content_text"),
+                        content_base64=upload.get("content_base64"),
+                        existing_ids=existing_ids,
+                        client_path=upload.get("client_path"),
+                        client_modified_ms=upload.get("client_modified_ms"),
+                        source_url=upload.get("source_url"),
+                        upload_key_base=upload.get("upload_key_base"),
+                        title=upload.get("title"),
+                        category=upload.get("category"),
+                        folder=upload.get("folder"),
+                        tags=upload.get("tags") or [],
+                        source_auto_tags=upload.get("source_auto_tags") or [],
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    if not continue_on_error:
+                        raise
+                    failed_uploads.append(f"{filename}: {exc}")
+                    continue
                 if not next_documents:
                     continue
 
@@ -336,8 +348,16 @@ class DocumentIngestionService:
                         if document.upload_key:
                             similarity_target_document_ids_by_upload_key[document.upload_key] = normalized_target_document_id
 
-            if not parsed_documents:
+            if not parsed_documents and not continue_on_error:
                 raise ValueError("The selected files did not produce any documents.")
+
+            if not parsed_documents:
+                return UploadOutcome(
+                    uploaded_documents=[],
+                    semantic_index_rebuilt=False,
+                    message="No documents were imported.",
+                    failed_uploads=failed_uploads,
+                )
 
             merge_result = self._merge_uploaded_documents(
                 existing_documents=existing_documents,
@@ -372,6 +392,7 @@ class DocumentIngestionService:
             updated_count=int(merge_result["updated_count"]),
             unchanged_count=int(merge_result["unchanged_count"]),
             ignored_count=int(merge_result["ignored_count"]),
+            failed_uploads=failed_uploads,
         )
 
     def delete_documents(self, *, document_ids: list[str]) -> DeleteOutcome:

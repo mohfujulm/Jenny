@@ -30,6 +30,14 @@ from app.path_tags import infer_watched_path_tags
 BINARY_WATCH_SUFFIXES = (
     WORD_UPLOAD_SUFFIXES | SPREADSHEET_UPLOAD_SUFFIXES | PDF_UPLOAD_SUFFIXES
 )
+WINDOWS_FILE_ATTRIBUTE_OFFLINE = 0x1000
+WINDOWS_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+WINDOWS_CLOUD_PLACEHOLDER_ATTRIBUTES = (
+    WINDOWS_FILE_ATTRIBUTE_OFFLINE
+    | WINDOWS_FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | WINDOWS_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
 
 
 LibraryChangedCallback = Callable[[], None]
@@ -269,15 +277,83 @@ class WatchedFolderService:
         if not normalized_watch_id:
             return False
 
+        with self._sync_lock:
+            with self._lock:
+                records = self._load_records_locked()
+                next_records = [
+                    record for record in records if record.watch_id != normalized_watch_id
+                ]
+                deleted = len(next_records) != len(records)
+                if deleted:
+                    self._write_records_locked(next_records)
+        return deleted
+
+    def unsynchronize_library_folder(self, folder_id: str) -> list[dict[str, Any]]:
+        normalized_folder_id = normalize_folder_path(folder_id)
+        if not normalized_folder_id:
+            return []
+
+        with self._sync_lock:
+            matching_records = self._find_watchers_for_library_folder_locked(
+                normalized_folder_id
+            )
+            removed_records = self._delete_watchers_by_id_locked(
+                {record.watch_id for record in matching_records}
+            )
+
+        return [self._record_to_payload(record) for record in removed_records]
+
+    def delete_library_folder_and_unsynchronize(
+        self,
+        folder_id: str,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        normalized_folder_id = normalize_folder_path(folder_id)
+        with self._sync_lock:
+            matching_records = self._find_watchers_for_library_folder_locked(
+                normalized_folder_id
+            )
+            outcome = self._ingestion_service.delete_folder(
+                folder_id=normalized_folder_id,
+            )
+            removed_records = self._delete_watchers_by_id_locked(
+                {record.watch_id for record in matching_records}
+            )
+        return outcome, [
+            self._record_to_payload(record) for record in removed_records
+        ]
+
+    def _find_watchers_for_library_folder_locked(
+        self,
+        normalized_folder_id: str,
+    ) -> list[WatchedFolderRecord]:
         with self._lock:
             records = self._load_records_locked()
-            next_records = [
-                record for record in records if record.watch_id != normalized_watch_id
+        return [
+            record
+            for record in records
+            if self._folder_is_within(record.library_folder, normalized_folder_id)
+            or self._folder_is_within(
+                self._resolve_library_folder(record),
+                normalized_folder_id,
+            )
+        ]
+
+    def _delete_watchers_by_id_locked(
+        self,
+        watch_ids: set[str],
+    ) -> list[WatchedFolderRecord]:
+        if not watch_ids:
+            return []
+        with self._lock:
+            records = self._load_records_locked()
+            removed_records = [
+                record for record in records if record.watch_id in watch_ids
             ]
-            deleted = len(next_records) != len(records)
-            if deleted:
-                self._write_records_locked(next_records)
-        return deleted
+            if removed_records:
+                self._write_records_locked(
+                    [record for record in records if record.watch_id not in watch_ids]
+                )
+        return removed_records
 
     def sync_watcher(self, watch_id: str) -> WatchSyncResult:
         normalized_watch_id = str(watch_id or "").strip()
@@ -350,22 +426,52 @@ class WatchedFolderService:
                     synced_at=synced_at,
                 )
 
-            uploads = [self._build_upload(record, source_path, item) for item in pending_files]
-            outcome = self._ingestion_service.ingest_upload_batch(uploads=uploads)
+            uploads: list[dict[str, Any]] = []
+            file_errors: list[str] = []
+            for pending_file in pending_files:
+                try:
+                    uploads.append(self._build_upload(record, source_path, pending_file))
+                except (OSError, RuntimeError, ValueError) as exc:
+                    file_errors.append(self._format_file_error(pending_file, exc))
+
+            if uploads:
+                outcome = self._ingestion_service.ingest_upload_batch(
+                    uploads=uploads,
+                    continue_on_error=True,
+                )
+                file_errors.extend(outcome.failed_uploads)
+            else:
+                outcome = None
+
+            imported_count = 0 if outcome is None else len(outcome.uploaded_documents)
+            error_count = len(file_errors)
+            if outcome is None:
+                outcome_message = "No documents were imported."
+            else:
+                outcome_message = outcome.message
+            message = self._append_file_errors(outcome_message, file_errors)
             return WatchSyncResult(
                 watch_id=record.watch_id,
                 display_name=record.display_name,
                 source_path=str(source_path),
-                status="success",
-                message=outcome.message,
+                status=(
+                    "success"
+                    if error_count == 0
+                    else "partial"
+                    if imported_count > 0
+                    else "error"
+                ),
+                message=message,
                 scanned_count=scanned_count,
-                imported_count=len(outcome.uploaded_documents),
-                created_count=outcome.created_count,
-                updated_count=outcome.updated_count,
-                unchanged_count=outcome.unchanged_count,
+                imported_count=imported_count,
+                created_count=0 if outcome is None else outcome.created_count,
+                updated_count=0 if outcome is None else outcome.updated_count,
+                unchanged_count=0 if outcome is None else outcome.unchanged_count,
                 skipped_count=skipped_count,
-                error_count=0,
-                semantic_index_rebuilt=outcome.semantic_index_rebuilt,
+                error_count=error_count,
+                semantic_index_rebuilt=(
+                    False if outcome is None else outcome.semantic_index_rebuilt
+                ),
                 synced_at=synced_at,
             )
         except Exception as exc:
@@ -494,6 +600,37 @@ class WatchedFolderService:
         path: Path,
     ) -> list[str]:
         return normalize_tag_values([*record.tags, *infer_watched_path_tags(path)])
+
+    def _format_file_error(
+        self,
+        pending_file: PendingWatchedFile,
+        error: Exception,
+    ) -> str:
+        if self._is_offline_cloud_file(pending_file.path):
+            return (
+                f"{pending_file.relative_path}: online-only cloud file is unavailable. "
+                "Start the sync client and make the file available offline, then sync again."
+            )
+        return f"{pending_file.relative_path}: {error}"
+
+    def _is_offline_cloud_file(self, path: Path) -> bool:
+        try:
+            file_attributes = int(getattr(path.stat(), "st_file_attributes", 0))
+        except OSError:
+            return False
+        return bool(file_attributes & WINDOWS_CLOUD_PLACEHOLDER_ATTRIBUTES)
+
+    def _append_file_errors(self, message: str, file_errors: list[str]) -> str:
+        if not file_errors:
+            return message
+        visible_errors = "; ".join(file_errors[:3])
+        hidden_count = len(file_errors) - 3
+        if hidden_count > 0:
+            visible_errors = f"{visible_errors}; and {hidden_count} more"
+        return (
+            f"{message} {len(file_errors)} file(s) could not be imported: "
+            f"{visible_errors}"
+        )
 
     def _source_auto_tags(self, document: DocumentRecord) -> list[str]:
         folder_auto_keys = {

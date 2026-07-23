@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import re
 import threading
@@ -111,6 +112,7 @@ TOOLS = [
         },
     },
 ]
+WEB_SEARCH_TOOL = {"type": "web_search"}
 
 INLINE_CITATION_RE = re.compile(r"\[([A-Za-z0-9][A-Za-z0-9_-]*)\]")
 
@@ -162,11 +164,33 @@ class SessionManager:
         self,
         conversation_id: str,
         title: str | None = None,
+        source_mode: SourceMode | None = None,
+        context_filter: ContextFilter | None = None,
     ) -> SavedConversationDetail:
         if self._saved_conversations is None:
             raise RuntimeError("Saved conversation storage is not configured.")
         session = self.get_or_create(conversation_id)
+        if source_mode is not None:
+            session.source_mode = source_mode
+        if context_filter is not None:
+            session.context_filter = context_filter.model_copy(deep=True)
         return self._saved_conversations.save_session(session, title=title)
+
+    def update_conversation_settings(
+        self,
+        conversation_id: str,
+        source_mode: SourceMode,
+        context_filter: ContextFilter,
+    ) -> SavedConversationDetail | None:
+        session = self.get_or_create(conversation_id)
+        session.source_mode = source_mode
+        session.context_filter = context_filter.model_copy(deep=True)
+
+        if self._saved_conversations is None:
+            return None
+        if self._saved_conversations.get_conversation(conversation_id) is None:
+            return None
+        return self._saved_conversations.save_session(session)
 
     def delete_saved_conversation(self, conversation_id: str) -> bool:
         if self._saved_conversations is None:
@@ -274,6 +298,11 @@ class BusinessKnowledgeAgent:
             response = self._run_response(session.history, source_mode, retrieval_context)
             session.history.extend(response.output)
 
+            web_citations, web_traces = self._collect_web_search_metadata(response.output)
+            for citation in web_citations:
+                citations[citation.document_id] = citation
+            traces.extend(web_traces)
+
             tool_calls = [item for item in response.output if getattr(item, "type", None) == "function_call"]
             if not tool_calls:
                 assistant_message = response.output_text.strip()
@@ -351,7 +380,7 @@ class BusinessKnowledgeAgent:
                 "If the user asks you to create a downloadable file or business deliverable, call "
                 "`generate_context_document` instead of only describing what the file would contain."
             ),
-            "tools": TOOLS,
+            "tools": [*TOOLS, WEB_SEARCH_TOOL] if source_mode == "broader" else TOOLS,
             "reasoning": {"effort": self._settings.openai_reasoning_effort},
             "text": {"verbosity": self._settings.openai_text_verbosity},
             "store": self._settings.openai_store_responses,
@@ -359,6 +388,57 @@ class BusinessKnowledgeAgent:
         if not self._settings.openai_store_responses:
             request["include"] = ["reasoning.encrypted_content"]
         return self.client.responses.create(**request)
+
+    def _collect_web_search_metadata(
+        self,
+        output_items: list[Any],
+    ) -> tuple[list[Citation], list[ToolTrace]]:
+        citations_by_url: "OrderedDict[str, Citation]" = OrderedDict()
+        traces: list[ToolTrace] = []
+
+        for item in output_items:
+            item_type = self._output_value(item, "type")
+            if item_type == "web_search_call":
+                action = self._output_value(item, "action")
+                arguments = {
+                    key: value
+                    for key in ("type", "query", "queries", "url")
+                    if (value := self._output_value(action, key)) is not None
+                }
+                action_type = str(arguments.get("type") or "search").replace("_", " ")
+                traces.append(
+                    ToolTrace(
+                        tool_name="web_search",
+                        arguments=arguments,
+                        summary=f"Completed web {action_type}.",
+                    )
+                )
+
+            if item_type != "message":
+                continue
+
+            for content_item in self._output_value(item, "content", []) or []:
+                for annotation in self._output_value(content_item, "annotations", []) or []:
+                    if self._output_value(annotation, "type") != "url_citation":
+                        continue
+                    url = str(self._output_value(annotation, "url") or "").strip()
+                    if not url or url in citations_by_url:
+                        continue
+                    title = str(self._output_value(annotation, "title") or url).strip() or url
+                    citation_id = f"WEB-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12].upper()}"
+                    citations_by_url[url] = Citation(
+                        document_id=citation_id,
+                        title=title,
+                        category="web",
+                        source_url=url,
+                    )
+
+        return list(citations_by_url.values()), traces
+
+    def _output_value(self, item: Any, name: str, default: Any = None) -> Any:
+        if isinstance(item, dict):
+            return item.get(name, default)
+        return getattr(item, name, default)
 
     def _execute_tool(
         self,
@@ -457,6 +537,16 @@ class BusinessKnowledgeAgent:
         citations: "OrderedDict[str, Citation]",
         traces: list[ToolTrace],
     ) -> list[Citation]:
+        web_citations = [
+            citation
+            for citation in citations.values()
+            if citation.category == "web" and citation.source_url
+        ]
+        internal_citations = OrderedDict(
+            (document_id, citation)
+            for document_id, citation in citations.items()
+            if citation.category != "web"
+        )
         explicit_ids = list(
             OrderedDict.fromkeys(
                 match.group(1)
@@ -464,16 +554,24 @@ class BusinessKnowledgeAgent:
             )
         )
         if explicit_ids:
-            return [citations[document_id] for document_id in explicit_ids if document_id in citations]
+            selected_internal = [
+                internal_citations[document_id]
+                for document_id in explicit_ids
+                if document_id in internal_citations
+            ]
+            return [*selected_internal, *web_citations]
 
         loaded_ids = list(
             OrderedDict.fromkeys(
                 trace.arguments["document_id"]
                 for trace in traces
-                if trace.tool_name == "get_document" and trace.arguments.get("document_id") in citations
+                if trace.tool_name == "get_document" and trace.arguments.get("document_id") in internal_citations
             )
         )
         if loaded_ids:
-            return [citations[document_id] for document_id in loaded_ids]
+            return [
+                *(internal_citations[document_id] for document_id in loaded_ids),
+                *web_citations,
+            ]
 
-        return list(citations.values())
+        return [*internal_citations.values(), *web_citations]

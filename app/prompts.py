@@ -37,14 +37,15 @@ In this mode:
 - Avoid filling internal knowledge gaps with general background unless the user explicitly asks for a broader perspective.
 """.strip(),
     "broader": """
-Source preference mode: broader knowledge allowed.
+Source preference mode: internal documents plus broader public knowledge.
 
 In this mode:
 - Still use internal document tools for company-specific questions, policies, procedures, and retained decisions.
-- You may supplement the answer with general model knowledge when that helps the user.
-- Make it clear what is grounded in internal documents and what is broader background.
-- Do not imply that broader background came from the internal datastore.
-- This mode allows broader model knowledge, not live web browsing.
+- Use live web search for current, recent, public, or external information and whenever fresh sources would improve the answer.
+- You may also supplement with general model knowledge when current web information is not needed.
+- Clearly distinguish internal-document facts from public web findings or general background.
+- Cite public web findings with the sources returned by web search.
+- Never use public web results to guess confidential company facts, approvals, policies, or commitments.
 """.strip(),
 }
 
