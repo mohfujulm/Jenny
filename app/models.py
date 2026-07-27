@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 SourceMode = Literal["internal", "broader"]
+ReasoningMode = Literal["standard", "maximum"]
 UploadSimilarityPolicy = Literal["warn", "replace", "ignore"]
 GeneratedDocumentFormat = Literal["txt", "docx", "xlsx"]
 
@@ -21,6 +22,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     message: str = Field(min_length=1, max_length=8000)
     source_mode: SourceMode = "internal"
+    reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
 
 
@@ -61,6 +63,7 @@ class ChatResponse(BaseModel):
     tool_trace: list[ToolTrace]
     generated_document: GeneratedChatDocument | None = None
     source_mode: SourceMode
+    reasoning_mode: ReasoningMode
     context_filter: ContextFilter
 
 
@@ -73,6 +76,7 @@ class SavedConversationSummary(BaseModel):
     updated_at: str
     message_count: int
     source_mode: SourceMode
+    reasoning_mode: ReasoningMode = "standard"
 
 
 class SavedConversationDetail(SavedConversationSummary):
@@ -88,6 +92,7 @@ class ConversationSaveRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=160)
     title: str | None = Field(default=None, max_length=120)
     source_mode: SourceMode | None = None
+    reasoning_mode: ReasoningMode | None = None
     context_filter: ContextFilter | None = None
 
 
@@ -99,12 +104,14 @@ class ConversationSaveResponse(BaseModel):
 class ConversationSettingsRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=160)
     source_mode: SourceMode
+    reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
 
 
 class ConversationSettingsResponse(BaseModel):
     conversation_id: str
     source_mode: SourceMode
+    reasoning_mode: ReasoningMode
     context_filter: ContextFilter
     saved: bool
     conversation: SavedConversationDetail | None = None
@@ -275,11 +282,19 @@ class WatchedFolderDeleteResponse(BaseModel):
     message: str
 
 
+class WatchedFolderOpenSourceResponse(BaseModel):
+    watch_id: str
+    source_path: str
+    opened: bool
+    message: str
+
+
 class DocumentGenerationRequest(BaseModel):
     instructions: str = Field(min_length=1, max_length=12000)
     title: str | None = Field(default=None, max_length=160)
     output_format: GeneratedDocumentFormat = "docx"
     source_mode: SourceMode = "internal"
+    reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
 
 
@@ -290,6 +305,7 @@ class DocumentGenerationResponse(BaseModel):
     message: str
     citations: list[Citation] = Field(default_factory=list)
     source_mode: SourceMode
+    reasoning_mode: ReasoningMode
     context_filter: ContextFilter
 
 
@@ -400,6 +416,7 @@ class SessionState:
     history: list[Any] = field(default_factory=list)
     transcript: list[ConversationMessage] = field(default_factory=list)
     source_mode: SourceMode = "internal"
+    reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = field(default_factory=ContextFilter)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_touched: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

@@ -65,6 +65,7 @@ class SavedConversationStore:
                 updated_at=datetime.now(timezone.utc).isoformat(),
                 message_count=len(session.transcript),
                 source_mode=session.source_mode,
+                reasoning_mode=session.reasoning_mode,
                 context_filter=session.context_filter.model_copy(deep=True),
                 messages=[_copy_message(message) for message in session.transcript],
             )
@@ -272,6 +273,7 @@ class SavedConversationStore:
             updated_at=conversation.updated_at,
             message_count=conversation.message_count,
             source_mode=conversation.source_mode,
+            reasoning_mode=conversation.reasoning_mode,
         )
 
     def _truncate_title(self, value: str) -> str:

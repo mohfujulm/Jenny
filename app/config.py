@@ -53,9 +53,11 @@ _load_dotenv_file()
 class Settings:
     app_title: str
     openai_api_key: str | None
-    openai_model: str
+    openai_standard_model: str
+    openai_maximum_model: str
     openai_store_responses: bool
-    openai_reasoning_effort: str
+    openai_standard_reasoning_effort: str
+    openai_maximum_reasoning_effort: str
     openai_text_verbosity: str
     session_ttl_minutes: int
     saved_conversations_path: Path
@@ -90,9 +92,17 @@ def get_settings() -> Settings:
     return Settings(
         app_title=os.getenv("APP_TITLE", "Team Knowledge Agent"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5"),
+        openai_standard_model=os.getenv("OPENAI_STANDARD_MODEL", "gpt-5.6-luna"),
+        openai_maximum_model=os.getenv("OPENAI_MAXIMUM_MODEL", "gpt-5.6-terra"),
         openai_store_responses=_to_bool(os.getenv("OPENAI_STORE_RESPONSES"), False),
-        openai_reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "medium"),
+        openai_standard_reasoning_effort=os.getenv(
+            "OPENAI_STANDARD_REASONING_EFFORT",
+            "medium",
+        ),
+        openai_maximum_reasoning_effort=os.getenv(
+            "OPENAI_MAXIMUM_REASONING_EFFORT",
+            "max",
+        ),
         openai_text_verbosity=os.getenv("OPENAI_TEXT_VERBOSITY", "medium"),
         session_ttl_minutes=_to_int(os.getenv("SESSION_TTL_MINUTES"), 60),
         saved_conversations_path=ROOT_DIR / os.getenv("SAVED_CONVERSATIONS_PATH", "app/data/saved_conversations.json"),

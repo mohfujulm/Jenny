@@ -17,11 +17,15 @@ const modeCopy = {
 
 const CHAT_PREFERENCES_STORAGE_KEY = "business-knowledge-chat-preferences-v1";
 const MAX_STORED_CHAT_PREFERENCES = 100;
+const CHAT_SCROLL_STORAGE_KEY = "business-knowledge-chat-scroll-positions-v1";
+const MAX_STORED_CHAT_SCROLL_POSITIONS = 100;
 const conversationPreferenceSyncTimers = new Map();
+let conversationScrollSaveTimer = null;
 
 const state = {
   conversationId: crypto.randomUUID(),
   sourceMode: "internal",
+  reasoningMode: "standard",
   sending: false,
   responseIndicatorNode: null,
   messages: [],
@@ -33,6 +37,7 @@ const state = {
     saveInFlight: false,
     renameInFlightId: null,
     deleteInFlightId: null,
+    restoringScrollPosition: false,
     contextMenu: {
       open: false,
       conversationId: null,
@@ -69,6 +74,7 @@ const state = {
     watchFoldersLoaded: false,
     watchFoldersLoadError: null,
     watchFolderInFlight: false,
+    openSourceLocationInFlight: false,
     inlineRenameFolderId: null,
     inlineRenameDraft: "",
     inlineRenameOriginalValue: "",
@@ -96,6 +102,8 @@ const messageList = document.getElementById("messageList");
 const composerForm = document.getElementById("composerForm");
 const messageInput = document.getElementById("messageInput");
 const sendButton = document.getElementById("sendButton");
+const reasoningModeButton = document.getElementById("reasoningModeButton");
+const reasoningModeLabel = document.getElementById("reasoningModeLabel");
 const newConversationButton = document.getElementById("newConversationButton");
 const saveConversationButton = document.getElementById("saveConversationButton");
 const conversationSearchInput = document.getElementById("conversationSearchInput");
@@ -176,6 +184,7 @@ const folderPropertiesTagsInput = document.getElementById("folderPropertiesTagsI
 const folderPropertiesRecursiveInput = document.getElementById("folderPropertiesRecursiveInput");
 const folderPropertiesEnabledInput = document.getElementById("folderPropertiesEnabledInput");
 const folderPropertiesTags = document.getElementById("folderPropertiesTags");
+const openSourceLocationButton = document.getElementById("openSourceLocationButton");
 const renameSelectedFolderButton = document.getElementById("renameSelectedFolderButton");
 const syncSelectedFolderButton = document.getElementById("syncSelectedFolderButton");
 const closeFolderPropertiesButton = document.getElementById("closeFolderPropertiesButton");
@@ -580,6 +589,8 @@ function normalizeConversationPreferences(preferences) {
     : {};
   return {
     sourceMode: preferences && preferences.sourceMode === "broader" ? "broader" : "internal",
+    reasoningMode:
+      preferences && preferences.reasoningMode === "maximum" ? "maximum" : "standard",
     contextFilter: {
       folderIds: normalizeItems(
         (Array.isArray(contextFilter.folderIds) ? contextFilter.folderIds : [])
@@ -642,6 +653,7 @@ function writeConversationPreferenceStore(store) {
 function getCurrentConversationPreferences() {
   return normalizeConversationPreferences({
     sourceMode: state.sourceMode,
+    reasoningMode: state.reasoningMode,
     contextFilter: state.library.appliedContext,
   });
 }
@@ -669,6 +681,7 @@ function getLastUsedConversationPreferences() {
 function resolveSavedConversationPreferences(payload) {
   const serverPreferences = normalizeConversationPreferences({
     sourceMode: payload.source_mode,
+    reasoningMode: payload.reasoning_mode,
     contextFilter: {
       folderIds: payload.context_filter?.folder_ids || [],
       documentIds: payload.context_filter?.document_ids || [],
@@ -688,6 +701,88 @@ function forgetConversationPreferences(conversationId) {
   writeConversationPreferenceStore(store);
 }
 
+function normalizeConversationScrollPosition(position) {
+  return {
+    scrollTop: Math.max(0, Number(position && position.scrollTop) || 0),
+    atBottom: Boolean(position && position.atBottom),
+    updatedAt: Math.max(0, Number(position && position.updatedAt) || 0),
+  };
+}
+
+function readConversationScrollStore() {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(CHAT_SCROLL_STORAGE_KEY) || "null");
+    if (!payload || typeof payload !== "object") {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(payload).map(([conversationId, position]) => [
+        conversationId,
+        normalizeConversationScrollPosition(position),
+      ])
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeConversationScrollStore(store) {
+  try {
+    const positions = Object.fromEntries(
+      Object.entries(store || {})
+        .map(([conversationId, position]) => [
+          conversationId,
+          normalizeConversationScrollPosition(position),
+        ])
+        .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
+        .slice(0, MAX_STORED_CHAT_SCROLL_POSITIONS)
+    );
+    window.localStorage.setItem(CHAT_SCROLL_STORAGE_KEY, JSON.stringify(positions));
+  } catch {
+    // Browser storage can be unavailable. The chat still defaults to its latest message.
+  }
+}
+
+function rememberConversationScrollPosition(conversationId) {
+  if (!conversationId || state.memory.restoringScrollPosition) {
+    return;
+  }
+  const maximumScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
+  const store = readConversationScrollStore();
+  store[conversationId] = {
+    scrollTop: Math.min(maximumScrollTop, Math.max(0, messageList.scrollTop)),
+    atBottom: maximumScrollTop - messageList.scrollTop <= 24,
+    updatedAt: Date.now(),
+  };
+  writeConversationScrollStore(store);
+}
+
+function rememberActiveConversationScrollPosition() {
+  if (conversationScrollSaveTimer !== null) {
+    window.clearTimeout(conversationScrollSaveTimer);
+    conversationScrollSaveTimer = null;
+  }
+  rememberConversationScrollPosition(state.conversationId);
+}
+
+function restoreConversationScrollPosition(conversationId) {
+  const storedPosition = readConversationScrollStore()[conversationId];
+  const maximumScrollTop = Math.max(0, messageList.scrollHeight - messageList.clientHeight);
+  state.memory.restoringScrollPosition = true;
+  messageList.scrollTop = !storedPosition || storedPosition.atBottom
+    ? maximumScrollTop
+    : Math.min(maximumScrollTop, storedPosition.scrollTop);
+  window.requestAnimationFrame(() => {
+    state.memory.restoringScrollPosition = false;
+  });
+}
+
+function forgetConversationScrollPosition(conversationId) {
+  const store = readConversationScrollStore();
+  delete store[conversationId];
+  writeConversationScrollStore(store);
+}
+
 async function syncConversationPreferences(conversationId, preferences) {
   try {
     const normalized = normalizeConversationPreferences(preferences);
@@ -699,6 +794,7 @@ async function syncConversationPreferences(conversationId, preferences) {
       body: JSON.stringify({
         conversation_id: conversationId,
         source_mode: normalized.sourceMode,
+        reasoning_mode: normalized.reasoningMode,
         context_filter: {
           folder_ids: normalized.contextFilter.folderIds,
           document_ids: normalized.contextFilter.documentIds,
@@ -1374,9 +1470,52 @@ function getSavedConversationSummary(conversationId) {
 }
 
 function sortSavedConversations(conversations) {
-  return [...conversations].sort((left, right) =>
-    String(right.updated_at || "").localeCompare(String(left.updated_at || ""))
-  );
+  return [...conversations].sort((left, right) => {
+    const leftLabel = getSavedConversationDisplayLabel(left);
+    const rightLabel = getSavedConversationDisplayLabel(right);
+    const alphabeticalComparison = leftLabel.localeCompare(rightLabel, undefined, {
+      sensitivity: "base",
+      numeric: true,
+    });
+    if (alphabeticalComparison !== 0) {
+      return alphabeticalComparison;
+    }
+
+    const exactComparison = leftLabel.localeCompare(rightLabel, undefined, {
+      sensitivity: "variant",
+      numeric: true,
+    });
+    if (exactComparison !== 0) {
+      return exactComparison;
+    }
+
+    return String(left.conversation_id || "").localeCompare(
+      String(right.conversation_id || "")
+    );
+  });
+}
+
+function getMostRecentlyUpdatedSavedConversation(conversations) {
+  return conversations.reduce((mostRecent, candidate) => {
+    if (!mostRecent) {
+      return candidate;
+    }
+    const candidateUpdatedAt = Date.parse(candidate.updated_at || "") || 0;
+    const mostRecentUpdatedAt = Date.parse(mostRecent.updated_at || "") || 0;
+    if (candidateUpdatedAt !== mostRecentUpdatedAt) {
+      return candidateUpdatedAt > mostRecentUpdatedAt ? candidate : mostRecent;
+    }
+    const candidateCreatedAt = Date.parse(candidate.created_at || "") || 0;
+    const mostRecentCreatedAt = Date.parse(mostRecent.created_at || "") || 0;
+    if (candidateCreatedAt !== mostRecentCreatedAt) {
+      return candidateCreatedAt > mostRecentCreatedAt ? candidate : mostRecent;
+    }
+    return String(candidate.conversation_id || "").localeCompare(
+      String(mostRecent.conversation_id || "")
+    ) > 0
+      ? candidate
+      : mostRecent;
+  }, null);
 }
 
 function buildConversationSummary(conversation) {
@@ -1391,6 +1530,7 @@ function buildConversationSummary(conversation) {
     updated_at: conversation.updated_at,
     message_count: conversation.message_count,
     source_mode: conversation.source_mode,
+    reasoning_mode: conversation.reasoning_mode,
   };
 }
 
@@ -1792,6 +1932,7 @@ function setComposerState(isSending) {
   state.sending = isSending;
   sendButton.disabled = isSending;
   messageInput.disabled = isSending;
+  reasoningModeButton.disabled = isSending;
   sendButton.textContent = isSending ? "Sending..." : "Send";
   renderConversationSaveButton();
 }
@@ -1849,6 +1990,7 @@ function setWatchFolderState(isInFlight) {
     syncFolderActionButton,
     addSynchronizedPathButton,
     openSynchronizedPathsButton,
+    openSourceLocationButton,
   ].forEach((element) => {
     if (element) {
       element.disabled = isInFlight;
@@ -2456,6 +2598,43 @@ async function syncWatchedFolder(watchId) {
     setWatchFolderStatus(error.message, "error");
   } finally {
     setWatchFolderState(false);
+  }
+}
+
+async function openWatchedFolderSource(watchId) {
+  if (
+    !watchId ||
+    state.library.watchFolderInFlight ||
+    state.library.openSourceLocationInFlight
+  ) {
+    return;
+  }
+
+  state.library.openSourceLocationInFlight = true;
+  renderDocumentEditor();
+  setLibraryActionStatus("Opening the synchronized source location...");
+
+  try {
+    const response = await fetch(
+      `/api/watch-folders/${encodeURIComponent(watchId)}/open-source`,
+      { method: "POST" }
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      const detail = payload && payload.detail
+        ? payload.detail
+        : "Open source location failed";
+      throw new Error(detail);
+    }
+    setLibraryActionStatus(
+      payload.message || "Opened the synchronized source location.",
+      "success"
+    );
+  } catch (error) {
+    setLibraryActionStatus(`Open source location failed: ${error.message}`, "error");
+  } finally {
+    state.library.openSourceLocationInFlight = false;
+    renderDocumentEditor();
   }
 }
 
@@ -3108,9 +3287,25 @@ function applySourceMode(sourceMode) {
   composerNote.textContent = modeCopy[sourceMode].composerNote;
 }
 
+function applyReasoningMode(reasoningMode) {
+  state.reasoningMode = reasoningMode === "maximum" ? "maximum" : "standard";
+  const isMaximum = state.reasoningMode === "maximum";
+  reasoningModeButton.classList.toggle("is-maximum", isMaximum);
+  reasoningModeButton.setAttribute("aria-pressed", String(isMaximum));
+  reasoningModeButton.setAttribute(
+    "aria-label",
+    isMaximum ? "Maximum reasoning" : "Standard reasoning"
+  );
+  reasoningModeButton.title = isMaximum
+    ? "Maximum reasoning uses GPT-5.6 Terra. Click for Standard reasoning."
+    : "Standard reasoning uses GPT-5.6 Luna. Click for Maximum reasoning.";
+  reasoningModeLabel.textContent = isMaximum ? "Maximum reasoning" : "Standard reasoning";
+}
+
 function applyConversationPreferences(preferences) {
   const normalized = normalizeConversationPreferences(preferences);
   applySourceMode(normalized.sourceMode);
+  applyReasoningMode(normalized.reasoningMode);
   applyContextSelection(normalized.contextFilter);
 }
 
@@ -3133,16 +3328,21 @@ function renderConversationMessages(messages) {
 
   if (!Array.isArray(messages) || messages.length === 0) {
     renderIntroMessage();
+    restoreConversationScrollPosition(state.conversationId);
     return;
   }
 
   messages.forEach((message) => {
     renderMessage(message, { scrollToLatest: false });
   });
-  messageList.scrollTop = 0;
+  restoreConversationScrollPosition(state.conversationId);
 }
 
-function resetConversation() {
+function resetConversation(options = {}) {
+  const { rememberCurrentScroll = true } = options;
+  if (rememberCurrentScroll) {
+    rememberActiveConversationScrollPosition();
+  }
   state.conversationId = crypto.randomUUID();
   applyConversationPreferences(getLastUsedConversationPreferences());
   rememberConversationPreferences(state.conversationId);
@@ -3152,7 +3352,10 @@ function resetConversation() {
   updateConversationMemoryStatus();
 }
 
-async function loadSavedConversations() {
+async function loadSavedConversations(options = {}) {
+  const { openMostRecent = false } = options;
+  const conversationIdWhenLoadingStarted = state.conversationId;
+  let mostRecentConversation = null;
   try {
     const response = await fetch("/api/conversations");
     const payload = await parseJsonResponse(response);
@@ -3166,6 +3369,9 @@ async function loadSavedConversations() {
     );
     state.memory.loaded = true;
     state.memory.loadError = null;
+    mostRecentConversation = getMostRecentlyUpdatedSavedConversation(
+      state.memory.conversations
+    );
   } catch (error) {
     state.memory.conversations = [];
     state.memory.loaded = true;
@@ -3175,13 +3381,29 @@ async function loadSavedConversations() {
   renderSavedConversationList();
   renderConversationSaveButton();
   updateConversationMemoryStatus();
+
+  if (
+    openMostRecent &&
+    mostRecentConversation &&
+    state.conversationId === conversationIdWhenLoadingStarted &&
+    !state.sending &&
+    !String(messageInput.value || "").trim()
+  ) {
+    await openSavedConversation(mostRecentConversation.conversation_id, {
+      rememberCurrentScroll: false,
+    });
+  }
 }
 
-async function openSavedConversation(conversationId) {
+async function openSavedConversation(conversationId, options = {}) {
+  const { rememberCurrentScroll = true } = options;
   if (!conversationId || state.sending) {
     return;
   }
 
+  if (rememberCurrentScroll) {
+    rememberActiveConversationScrollPosition();
+  }
   setConversationMemoryStatus("Loading saved conversation...");
 
   try {
@@ -3245,6 +3467,7 @@ async function saveCurrentConversation(options = {}) {
       body: JSON.stringify({
         conversation_id: state.conversationId,
         source_mode: state.sourceMode,
+        reasoning_mode: state.reasoningMode,
         context_filter: {
           folder_ids: state.library.appliedContext.folderIds,
           document_ids: state.library.appliedContext.documentIds,
@@ -3310,6 +3533,7 @@ async function deleteSavedConversation(conversationId) {
     }
     if (conversationId !== state.conversationId) {
       forgetConversationPreferences(conversationId);
+      forgetConversationScrollPosition(conversationId);
     }
     renderSavedConversationList();
     renderConversationSaveButton();
@@ -4268,12 +4492,19 @@ function renderFolderProperties() {
   }
 
   renameSelectedFolderButton.textContent = watchedFolder ? "Save settings" : "Rename folder";
+  const folderActionInFlight =
+    state.library.watchFolderInFlight || state.library.openSourceLocationInFlight;
   renameSelectedFolderButton.disabled = watchedFolder
-    ? state.library.watchFolderInFlight
+    ? folderActionInFlight
     : !canMutateLibrary();
-  folderPropertiesAliasInput.disabled = !watchedFolder || state.library.watchFolderInFlight;
+  folderPropertiesAliasInput.disabled = !watchedFolder || folderActionInFlight;
+  openSourceLocationButton.classList.toggle("is-hidden", !watchedFolder);
+  openSourceLocationButton.disabled = !watchedFolder || folderActionInFlight;
+  openSourceLocationButton.textContent = state.library.openSourceLocationInFlight
+    ? "Opening..."
+    : "Open source location";
   syncSelectedFolderButton.classList.toggle("is-hidden", !watchedFolder);
-  syncSelectedFolderButton.disabled = !watchedFolder || state.library.watchFolderInFlight;
+  syncSelectedFolderButton.disabled = !watchedFolder || folderActionInFlight;
   syncSelectedFolderButton.textContent = state.library.watchFolderInFlight ? "Syncing..." : "Sync now";
 
   folderPropertiesCard.classList.toggle("is-watched", Boolean(watchedFolder));
@@ -4962,6 +5193,7 @@ async function generateDocumentFromContext(event) {
         instructions,
         output_format: outputFormat,
         source_mode: state.sourceMode,
+        reasoning_mode: state.reasoningMode,
         context_filter: {
           folder_ids: state.library.appliedContext.folderIds,
           document_ids: state.library.appliedContext.documentIds,
@@ -5014,6 +5246,7 @@ async function sendMessage(message) {
         conversation_id: state.conversationId,
         message,
         source_mode: state.sourceMode,
+        reasoning_mode: state.reasoningMode,
         context_filter: {
           folder_ids: state.library.appliedContext.folderIds,
           document_ids: state.library.appliedContext.documentIds,
@@ -5168,6 +5401,22 @@ newConversationButton.addEventListener("click", () => {
   messageInput.focus();
 });
 
+messageList.addEventListener("scroll", () => {
+  if (state.memory.restoringScrollPosition) {
+    return;
+  }
+  if (conversationScrollSaveTimer !== null) {
+    window.clearTimeout(conversationScrollSaveTimer);
+  }
+  const conversationId = state.conversationId;
+  conversationScrollSaveTimer = window.setTimeout(() => {
+    conversationScrollSaveTimer = null;
+    if (conversationId === state.conversationId) {
+      rememberConversationScrollPosition(conversationId);
+    }
+  }, 120);
+});
+
 if (saveConversationButton) {
   saveConversationButton.addEventListener("click", async () => {
     await saveCurrentConversation();
@@ -5227,6 +5476,18 @@ modeButtons.forEach((button) => {
       "success"
     );
   });
+});
+
+reasoningModeButton.addEventListener("click", () => {
+  const nextReasoningMode = state.reasoningMode === "maximum" ? "standard" : "maximum";
+  applyReasoningMode(nextReasoningMode);
+  persistActiveConversationPreferences();
+  const modelLabel = nextReasoningMode === "maximum" ? "Terra" : "Luna";
+  const reasoningLabel = nextReasoningMode === "maximum" ? "Maximum" : "Standard";
+  setConversationMemoryStatus(
+    `${reasoningLabel} reasoning (${modelLabel}) is now active and remembered for this conversation.`,
+    "success"
+  );
 });
 
 openLibraryButton.addEventListener("click", () => {
@@ -5394,6 +5655,13 @@ syncSelectedFolderButton.addEventListener("click", async () => {
   }
 });
 
+openSourceLocationButton.addEventListener("click", async () => {
+  const watchedFolder = getWatchedFolderForLibraryFolder(state.library.activeFolderId);
+  if (watchedFolder) {
+    await openWatchedFolderSource(watchedFolder.watch_id);
+  }
+});
+
 closeFolderPropertiesButton.addEventListener("click", () => {
   setActiveFolder(null);
 });
@@ -5478,12 +5746,17 @@ window.addEventListener("resize", () => {
   }
 });
 
+window.addEventListener("pagehide", () => {
+  rememberActiveConversationScrollPosition();
+});
+
 documentBrowser.addEventListener("scroll", () => {
   if (state.library.contextMenu.open) {
     closeExplorerContextMenu();
   }
 }, true);
 
+applyReasoningMode(state.reasoningMode);
 applySourceMode(state.sourceMode);
 renderContextSummary();
 renderDeleteSelectionSummary();
@@ -5496,7 +5769,7 @@ setDocumentGenerationStatus("Uses the active source mode and currently applied l
 setUploadStatus("Choose files or a local folder, including Dropbox-synced folders, to import and embed in one pass.");
 renderSavedConversationList();
 renderConversationSaveButton();
-resetConversation();
+resetConversation({ rememberCurrentScroll: false });
 void loadHealth();
-void loadSavedConversations();
+void loadSavedConversations({ openMostRecent: true });
 void loadDocumentLibrary();

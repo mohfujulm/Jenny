@@ -34,6 +34,7 @@ class ConversationPreferenceTests(unittest.TestCase):
         saved = self.manager.save_conversation(
             conversation_id,
             source_mode="broader",
+            reasoning_mode="maximum",
             context_filter=ContextFilter(
                 folder_ids=["Projects/PANYNJ"],
                 document_ids=["DOC-123"],
@@ -41,6 +42,7 @@ class ConversationPreferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(saved.source_mode, "broader")
+        self.assertEqual(saved.reasoning_mode, "maximum")
         self.assertEqual(saved.context_filter.folder_ids, ["Projects/PANYNJ"])
         self.assertEqual(saved.context_filter.document_ids, ["DOC-123"])
 
@@ -53,6 +55,7 @@ class ConversationPreferenceTests(unittest.TestCase):
             conversation_id,
             "broader",
             ContextFilter(document_ids=["DOC-456"]),
+            "maximum",
         )
 
         self.assertIsNotNone(updated)
@@ -61,6 +64,7 @@ class ConversationPreferenceTests(unittest.TestCase):
         self.assertEqual(reloaded.title, "PANYNJ notes")
         self.assertTrue(reloaded.title_is_custom)
         self.assertEqual(reloaded.source_mode, "broader")
+        self.assertEqual(reloaded.reasoning_mode, "maximum")
         self.assertEqual(reloaded.context_filter.document_ids, ["DOC-456"])
 
     def test_unsaved_chat_settings_stay_on_the_session_until_first_save(self) -> None:
@@ -70,6 +74,7 @@ class ConversationPreferenceTests(unittest.TestCase):
             conversation_id,
             "broader",
             ContextFilter(folder_ids=["Project Delivery"]),
+            "maximum",
         )
         self.assertIsNone(updated)
 
@@ -77,6 +82,7 @@ class ConversationPreferenceTests(unittest.TestCase):
         saved = self.manager.save_conversation(conversation_id)
 
         self.assertEqual(saved.source_mode, "broader")
+        self.assertEqual(saved.reasoning_mode, "maximum")
         self.assertEqual(saved.context_filter.folder_ids, ["Project Delivery"])
 
 

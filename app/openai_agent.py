@@ -22,6 +22,7 @@ from app.models import (
     ContextFilter,
     ConversationMessage,
     GeneratedChatDocument,
+    ReasoningMode,
     SavedConversationDetail,
     SavedConversationSummary,
     SessionState,
@@ -29,6 +30,7 @@ from app.models import (
     ToolTrace,
 )
 from app.prompts import build_context_scope_prompt, build_system_prompt
+from app.reasoning_profiles import get_chat_reasoning_profile
 from app.sensitive_text import redact_sensitive_text
 
 
@@ -165,6 +167,7 @@ class SessionManager:
         conversation_id: str,
         title: str | None = None,
         source_mode: SourceMode | None = None,
+        reasoning_mode: ReasoningMode | None = None,
         context_filter: ContextFilter | None = None,
     ) -> SavedConversationDetail:
         if self._saved_conversations is None:
@@ -172,6 +175,8 @@ class SessionManager:
         session = self.get_or_create(conversation_id)
         if source_mode is not None:
             session.source_mode = source_mode
+        if reasoning_mode is not None:
+            session.reasoning_mode = reasoning_mode
         if context_filter is not None:
             session.context_filter = context_filter.model_copy(deep=True)
         return self._saved_conversations.save_session(session, title=title)
@@ -181,9 +186,11 @@ class SessionManager:
         conversation_id: str,
         source_mode: SourceMode,
         context_filter: ContextFilter,
+        reasoning_mode: ReasoningMode = "standard",
     ) -> SavedConversationDetail | None:
         session = self.get_or_create(conversation_id)
         session.source_mode = source_mode
+        session.reasoning_mode = reasoning_mode
         session.context_filter = context_filter.model_copy(deep=True)
 
         if self._saved_conversations is None:
@@ -231,6 +238,7 @@ class SessionManager:
                 for message in conversation.messages
             ],
             source_mode=conversation.source_mode,
+            reasoning_mode=conversation.reasoning_mode,
             context_filter=conversation.context_filter.model_copy(deep=True),
             created_at=datetime.fromisoformat(conversation.created_at),
             last_touched=now,
@@ -273,9 +281,11 @@ class BusinessKnowledgeAgent:
         message: str,
         source_mode: SourceMode,
         context_filter: ContextFilter,
+        reasoning_mode: ReasoningMode = "standard",
     ) -> ChatResponse:
         session = self._sessions.get_or_create(conversation_id)
         session.source_mode = source_mode
+        session.reasoning_mode = reasoning_mode
         session.context_filter = context_filter.model_copy(deep=True)
         session.history.append({"role": "user", "content": message})
         session.transcript.append(
@@ -295,7 +305,12 @@ class BusinessKnowledgeAgent:
         generated_document: GeneratedChatDocument | None = None
 
         while True:
-            response = self._run_response(session.history, source_mode, retrieval_context)
+            response = self._run_response(
+                session.history,
+                source_mode,
+                retrieval_context,
+                reasoning_mode,
+            )
             session.history.extend(response.output)
 
             web_citations, web_traces = self._collect_web_search_metadata(response.output)
@@ -330,6 +345,7 @@ class BusinessKnowledgeAgent:
                     tool_trace=traces,
                     generated_document=generated_document,
                     source_mode=source_mode,
+                    reasoning_mode=reasoning_mode,
                     context_filter=context_filter,
                 )
 
@@ -340,6 +356,7 @@ class BusinessKnowledgeAgent:
                     arguments,
                     source_mode,
                     retrieval_context,
+                    reasoning_mode,
                 )
                 for citation in new_citations:
                     citations[citation.document_id] = citation
@@ -370,9 +387,11 @@ class BusinessKnowledgeAgent:
         history: list[Any],
         source_mode: SourceMode,
         retrieval_context: RetrievalContext,
+        reasoning_mode: ReasoningMode = "standard",
     ) -> Any:
+        reasoning_profile = get_chat_reasoning_profile(self._settings, reasoning_mode)
         request: dict[str, Any] = {
-            "model": self._settings.openai_model,
+            "model": reasoning_profile["model"],
             "input": history,
             "instructions": (
                 f"{build_system_prompt(source_mode)}\n\n"
@@ -381,7 +400,7 @@ class BusinessKnowledgeAgent:
                 "`generate_context_document` instead of only describing what the file would contain."
             ),
             "tools": [*TOOLS, WEB_SEARCH_TOOL] if source_mode == "broader" else TOOLS,
-            "reasoning": {"effort": self._settings.openai_reasoning_effort},
+            "reasoning": {"effort": reasoning_profile["effort"]},
             "text": {"verbosity": self._settings.openai_text_verbosity},
             "store": self._settings.openai_store_responses,
         }
@@ -446,6 +465,7 @@ class BusinessKnowledgeAgent:
         arguments: dict[str, Any],
         source_mode: SourceMode,
         retrieval_context: RetrievalContext,
+        reasoning_mode: ReasoningMode = "standard",
     ) -> tuple[dict[str, Any], list[Citation], str, GeneratedDocumentResult | None]:
         if tool_name == "search_documents":
             hits = self._document_store.search_documents(
@@ -506,6 +526,7 @@ class BusinessKnowledgeAgent:
                 title=arguments.get("title"),
                 output_format=arguments["output_format"],
                 source_mode=source_mode,
+                reasoning_mode=reasoning_mode,
                 context_filter=context_filter,
             )
             payload = {

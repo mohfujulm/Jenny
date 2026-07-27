@@ -56,6 +56,7 @@ from app.models import (
     WatchedFolderCreateResponse,
     WatchedFolderDeleteResponse,
     WatchedFolderListResponse,
+    WatchedFolderOpenSourceResponse,
     WatchedFolderSummary,
     WatchedFolderSyncResponse,
     WatchedFolderSyncResult,
@@ -64,6 +65,7 @@ from app.models import (
 )
 from app.openai_agent import BusinessKnowledgeAgent, SessionManager
 from app.ocr import get_ocr_runtime_status
+from app.reasoning_profiles import get_chat_reasoning_profiles
 
 
 settings = get_settings()
@@ -124,6 +126,150 @@ def _open_local_folder_picker() -> str | None:
     if platform.system() == "Windows":
         return _open_windows_folder_picker()
     return _open_tk_folder_picker()
+
+
+def _open_local_source_folder(source_path: Path) -> None:
+    resolved_path = source_path.resolve()
+    if not resolved_path.exists() or not resolved_path.is_dir():
+        raise ValueError(f"Synchronized source folder does not exist: {resolved_path}")
+
+    try:
+        if platform.system() == "Windows":
+            _open_windows_source_folder(resolved_path)
+            return
+
+        command = (
+            ["open", str(resolved_path)]
+            if platform.system() == "Darwin"
+            else ["xdg-open", str(resolved_path)]
+        )
+        subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not open the synchronized source folder: {resolved_path}"
+        ) from exc
+
+
+def _open_windows_source_folder(source_path: Path) -> None:
+    escaped_path = str(source_path).replace("'", "''")
+    script = rf"""
+$TargetPath = '{escaped_path}'
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ExplorerForeground {{
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+
+    [DllImport("user32.dll")]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+}}
+"@
+
+$resolvedTarget = [System.IO.Path]::GetFullPath($TargetPath).TrimEnd('\')
+Start-Process -FilePath explorer.exe -ArgumentList ('"' + $resolvedTarget + '"')
+
+$shell = New-Object -ComObject Shell.Application
+$window = $null
+for ($attempt = 0; $attempt -lt 30 -and $null -eq $window; $attempt++) {{
+    Start-Sleep -Milliseconds 100
+    foreach ($candidate in @($shell.Windows())) {{
+        try {{
+            $candidatePath = ([System.Uri]$candidate.LocationURL).LocalPath
+            $resolvedCandidate = [System.IO.Path]::GetFullPath($candidatePath).TrimEnd('\')
+            if ([string]::Equals(
+                $resolvedCandidate,
+                $resolvedTarget,
+                [System.StringComparison]::OrdinalIgnoreCase
+            )) {{
+                $window = $candidate
+                break
+            }}
+        }} catch {{}}
+    }}
+}}
+
+if ($null -ne $window) {{
+    $handle = [IntPtr]::new([Int64]$window.HWND)
+    $currentThread = [ExplorerForeground]::GetCurrentThreadId()
+    $foregroundHandle = [ExplorerForeground]::GetForegroundWindow()
+    $foregroundThread = [ExplorerForeground]::GetWindowThreadProcessId(
+        $foregroundHandle,
+        [IntPtr]::Zero
+    )
+    $attached = $false
+
+    if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {{
+        $attached = [ExplorerForeground]::AttachThreadInput(
+            $currentThread,
+            $foregroundThread,
+            $true
+        )
+    }}
+
+    try {{
+        [ExplorerForeground]::ShowWindowAsync($handle, 9) | Out-Null
+        [ExplorerForeground]::BringWindowToTop($handle) | Out-Null
+        [ExplorerForeground]::SetForegroundWindow($handle) | Out-Null
+        [ExplorerForeground]::SetFocus($handle) | Out-Null
+    }} finally {{
+        if ($attached) {{
+            [ExplorerForeground]::AttachThreadInput(
+                $currentThread,
+                $foregroundThread,
+                $false
+            ) | Out-Null
+        }}
+    }}
+}}
+"""
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("Windows File Explorer is not available.") from exc
 
 
 def _open_windows_folder_picker() -> str | None:
@@ -234,7 +380,7 @@ def health() -> dict[str, object]:
     return {
         "status": "ok",
         "app_title": settings.app_title,
-        "model": settings.openai_model,
+        "chat_reasoning_models": get_chat_reasoning_profiles(settings),
         "docstore_backend": settings.docstore_backend,
         "openai_configured": bool(settings.openai_api_key),
         "pdf_ocr": get_ocr_runtime_status(settings),
@@ -275,6 +421,31 @@ def list_watched_folders() -> WatchedFolderListResponse:
             for item in watch_folder_service.list_watchers()
         ]
     )
+
+
+@app.post(
+    "/api/watch-folders/{watch_id}/open-source",
+    response_model=WatchedFolderOpenSourceResponse,
+)
+def open_watched_folder_source(watch_id: str) -> WatchedFolderOpenSourceResponse:
+    try:
+        source_path = watch_folder_service.resolve_watcher_source_path(watch_id)
+        _open_local_source_folder(source_path)
+        return WatchedFolderOpenSourceResponse(
+            watch_id=watch_id,
+            source_path=str(source_path),
+            opened=True,
+            message=f"Opened source location: {source_path}",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Unexpected server error while opening the synchronized source folder.",
+        ) from exc
 
 
 @app.post("/api/watch-folders", response_model=WatchedFolderCreateResponse)
@@ -392,6 +563,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             request.message.strip(),
             request.source_mode,
             request.context_filter,
+            request.reasoning_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -428,6 +600,7 @@ def save_conversation(request: ConversationSaveRequest) -> ConversationSaveRespo
             request.conversation_id,
             title=request.title,
             source_mode=request.source_mode,
+            reasoning_mode=request.reasoning_mode,
             context_filter=request.context_filter,
         )
         return ConversationSaveResponse(
@@ -454,10 +627,12 @@ def update_conversation_settings(
             request.conversation_id,
             request.source_mode,
             request.context_filter,
+            request.reasoning_mode,
         )
         return ConversationSettingsResponse(
             conversation_id=request.conversation_id,
             source_mode=request.source_mode,
+            reasoning_mode=request.reasoning_mode,
             context_filter=request.context_filter,
             saved=conversation is not None,
             conversation=conversation,
@@ -709,6 +884,7 @@ def generate_document(request: DocumentGenerationRequest) -> DocumentGenerationR
             title=request.title,
             output_format=request.output_format,
             source_mode=request.source_mode,
+            reasoning_mode=request.reasoning_mode,
             context_filter=request.context_filter,
         )
         return DocumentGenerationResponse(
@@ -718,6 +894,7 @@ def generate_document(request: DocumentGenerationRequest) -> DocumentGenerationR
             message=result.message,
             citations=result.citations,
             source_mode=request.source_mode,
+            reasoning_mode=request.reasoning_mode,
             context_filter=request.context_filter,
         )
     except ValueError as exc:
