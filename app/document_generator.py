@@ -13,8 +13,9 @@ from openai import OpenAI
 
 from app.config import Settings
 from app.datastore import BaseDocumentStore, DocumentRecord, RetrievalContext
-from app.models import Citation, ContextFilter, GeneratedDocumentFormat, SourceMode
+from app.models import Citation, ContextFilter, GeneratedDocumentFormat, ReasoningMode, SourceMode
 from app.prompts import build_context_scope_prompt, build_system_prompt
+from app.reasoning_profiles import get_chat_reasoning_profile
 
 
 TEXT_MIME_TYPE = "text/plain; charset=utf-8"
@@ -57,6 +58,7 @@ class ContextDocumentGenerator:
         title: str | None,
         output_format: GeneratedDocumentFormat,
         source_mode: SourceMode,
+        reasoning_mode: ReasoningMode = "standard",
         context_filter: ContextFilter,
     ) -> GeneratedDocumentResult:
         normalized_instructions = str(instructions or "").strip()
@@ -82,6 +84,7 @@ class ContextDocumentGenerator:
                 title=normalized_title,
                 instructions=normalized_instructions,
                 source_mode=source_mode,
+                reasoning_mode=reasoning_mode,
                 retrieval_context=retrieval_context,
                 supporting_documents=supporting_documents,
                 citations=citations,
@@ -100,6 +103,7 @@ class ContextDocumentGenerator:
             instructions=normalized_instructions,
             output_format=output_format,
             source_mode=source_mode,
+            reasoning_mode=reasoning_mode,
             retrieval_context=retrieval_context,
             supporting_documents=supporting_documents,
             citations=citations,
@@ -200,6 +204,7 @@ class ContextDocumentGenerator:
         instructions: str,
         output_format: GeneratedDocumentFormat,
         source_mode: SourceMode,
+        reasoning_mode: ReasoningMode,
         retrieval_context: RetrievalContext,
         supporting_documents: list[DocumentRecord],
         citations: list[Citation],
@@ -210,6 +215,7 @@ class ContextDocumentGenerator:
         ]
         request = self._build_model_request(
             source_mode=source_mode,
+            reasoning_mode=reasoning_mode,
             retrieval_context=retrieval_context,
             extra_instructions=(
                 "You are generating a downloadable business document from internal library context.\n"
@@ -239,6 +245,7 @@ class ContextDocumentGenerator:
         title: str,
         instructions: str,
         source_mode: SourceMode,
+        reasoning_mode: ReasoningMode,
         retrieval_context: RetrievalContext,
         supporting_documents: list[DocumentRecord],
         citations: list[Citation],
@@ -249,6 +256,7 @@ class ContextDocumentGenerator:
         ]
         request = self._build_model_request(
             source_mode=source_mode,
+            reasoning_mode=reasoning_mode,
             retrieval_context=retrieval_context,
             extra_instructions=(
                 "You are generating spreadsheet content from internal library context.\n"
@@ -277,12 +285,14 @@ class ContextDocumentGenerator:
         self,
         *,
         source_mode: SourceMode,
+        reasoning_mode: ReasoningMode,
         retrieval_context: RetrievalContext,
         extra_instructions: str,
         user_payload: dict[str, Any],
     ) -> dict[str, Any]:
+        reasoning_profile = get_chat_reasoning_profile(self._settings, reasoning_mode)
         request: dict[str, Any] = {
-            "model": self._settings.openai_model,
+            "model": reasoning_profile["model"],
             "input": [
                 {
                     "role": "user",
@@ -294,7 +304,7 @@ class ContextDocumentGenerator:
                 f"{build_context_scope_prompt(sorted(retrieval_context.folder_ids), sorted(retrieval_context.document_ids))}\n\n"
                 f"{extra_instructions}"
             ),
-            "reasoning": {"effort": self._settings.openai_reasoning_effort},
+            "reasoning": {"effort": reasoning_profile["effort"]},
             "text": {"verbosity": self._settings.openai_text_verbosity},
             "store": self._settings.openai_store_responses,
         }

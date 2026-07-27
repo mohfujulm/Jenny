@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import base64
 import json
+import re
 import threading
 from typing import Any, Callable
 from uuid import uuid4
@@ -132,6 +133,40 @@ class WatchedFolderService:
 
     def list_watchers(self) -> list[dict[str, Any]]:
         return [self._record_to_payload(record) for record in self._load_records()]
+
+    def resolve_watcher_source_path(self, watch_id: str) -> Path:
+        normalized_watch_id = str(watch_id or "").strip()
+        if not normalized_watch_id:
+            raise ValueError("Watch ID is required.")
+
+        with self._sync_lock:
+            record = next(
+                (
+                    item
+                    for item in self._load_records()
+                    if item.watch_id == normalized_watch_id
+                ),
+                None,
+            )
+            if record is None:
+                raise ValueError("Watched folder not found.")
+
+            source_path = self._record_source_path(record)
+            if source_path.exists() and source_path.is_dir():
+                return source_path.resolve()
+
+            relocated_source_path = self._find_relocated_source_path(source_path)
+            if relocated_source_path is not None:
+                self._persist_source_path(
+                    record.watch_id,
+                    root_path=str(relocated_source_path),
+                    include_subfolder=None,
+                )
+                return relocated_source_path.resolve()
+
+            raise ValueError(
+                f"Synchronized source folder does not exist: {source_path}"
+            )
 
     def create_watcher(
         self,
@@ -398,9 +433,24 @@ class WatchedFolderService:
     def _sync_record_locked(self, record: WatchedFolderRecord) -> WatchSyncResult:
         synced_at = datetime.now(timezone.utc).isoformat()
         source_path = self._record_source_path(record)
+        relocated_from: Path | None = None
         try:
             if not source_path.exists() or not source_path.is_dir():
-                raise ValueError(f"Watched folder does not exist: {source_path}")
+                relocated_source_path = self._find_relocated_source_path(source_path)
+                if relocated_source_path is None:
+                    raise ValueError(f"Watched folder does not exist: {source_path}")
+                relocated_from = source_path
+                source_path = relocated_source_path
+                record = replace(
+                    record,
+                    root_path=str(relocated_source_path),
+                    include_subfolder=None,
+                )
+                self._persist_source_path(
+                    record.watch_id,
+                    root_path=record.root_path,
+                    include_subfolder=record.include_subfolder,
+                )
 
             resolved_library_folder = self._resolve_library_folder(record)
             if resolved_library_folder != normalize_folder_path(record.library_folder):
@@ -414,7 +464,11 @@ class WatchedFolderService:
                     display_name=record.display_name,
                     source_path=str(source_path),
                     status="success",
-                    message=f"Scanned {scanned_count} file(s). No new or changed documents found.",
+                    message=self._append_relocation_message(
+                        f"Scanned {scanned_count} file(s). No new or changed documents found.",
+                        relocated_from=relocated_from,
+                        relocated_to=source_path,
+                    ),
                     scanned_count=scanned_count,
                     imported_count=0,
                     created_count=0,
@@ -450,6 +504,11 @@ class WatchedFolderService:
             else:
                 outcome_message = outcome.message
             message = self._append_file_errors(outcome_message, file_errors)
+            message = self._append_relocation_message(
+                message,
+                relocated_from=relocated_from,
+                relocated_to=source_path,
+            )
             return WatchSyncResult(
                 watch_id=record.watch_id,
                 display_name=record.display_name,
@@ -632,6 +691,20 @@ class WatchedFolderService:
             f"{visible_errors}"
         )
 
+    def _append_relocation_message(
+        self,
+        message: str,
+        *,
+        relocated_from: Path | None,
+        relocated_to: Path,
+    ) -> str:
+        if relocated_from is None:
+            return message
+        return (
+            f"Automatically repaired the synchronized path after its project folder moved "
+            f"from `{relocated_from}` to `{relocated_to}`. {message}"
+        )
+
     def _source_auto_tags(self, document: DocumentRecord) -> list[str]:
         folder_auto_keys = {
             tag.lower() for tag in build_folder_auto_tags(document.folder)
@@ -703,6 +776,27 @@ class WatchedFolderService:
             records = self._load_records_locked()
             updated_records = [
                 replace(record, library_folder=library_folder)
+                if record.watch_id == watch_id
+                else record
+                for record in records
+            ]
+            self._write_records_locked(updated_records)
+
+    def _persist_source_path(
+        self,
+        watch_id: str,
+        *,
+        root_path: str,
+        include_subfolder: str | None,
+    ) -> None:
+        with self._lock:
+            records = self._load_records_locked()
+            updated_records = [
+                replace(
+                    record,
+                    root_path=root_path,
+                    include_subfolder=include_subfolder,
+                )
                 if record.watch_id == watch_id
                 else record
                 for record in records
@@ -896,6 +990,48 @@ class WatchedFolderService:
 
     def _record_source_path(self, record: WatchedFolderRecord) -> Path:
         return self._source_path(Path(record.root_path), record.include_subfolder)
+
+    def _find_relocated_source_path(self, missing_source_path: Path) -> Path | None:
+        missing_path = missing_source_path.resolve()
+        existing_ancestor = missing_path
+        missing_parts: list[str] = []
+        while not existing_ancestor.exists():
+            parent = existing_ancestor.parent
+            if parent == existing_ancestor:
+                return None
+            missing_parts.insert(0, existing_ancestor.name)
+            existing_ancestor = parent
+
+        if not existing_ancestor.is_dir() or not missing_parts:
+            return None
+
+        project_number = self._project_number_from_folder_name(missing_parts[0])
+        if project_number is None:
+            return None
+
+        relocated_candidates: list[Path] = []
+        try:
+            sibling_candidates = existing_ancestor.iterdir()
+            for candidate in sibling_candidates:
+                if not candidate.is_dir():
+                    continue
+                if self._project_number_from_folder_name(candidate.name) != project_number:
+                    continue
+                relocated_path = candidate.joinpath(*missing_parts[1:]).resolve()
+                if relocated_path.is_dir():
+                    relocated_candidates.append(relocated_path)
+        except OSError:
+            return None
+
+        if len(relocated_candidates) != 1:
+            return None
+        return relocated_candidates[0]
+
+    def _project_number_from_folder_name(self, folder_name: str) -> str | None:
+        match = re.match(r"^\s*(\d+)\s*[.\-]", str(folder_name or ""))
+        if match is None:
+            return None
+        return match.group(1).lstrip("0") or "0"
 
     def _record_display_name(self, record: WatchedFolderRecord) -> str:
         return (

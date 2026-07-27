@@ -54,9 +54,14 @@ pip install -r requirements.txt
 
 ```text
 OPENAI_API_KEY=your_key_here
-OPENAI_MODEL=gpt-5.5
+OPENAI_STANDARD_MODEL=gpt-5.6-luna
+OPENAI_MAXIMUM_MODEL=gpt-5.6-terra
 DOCSTORE_BACKEND=json
 ```
+
+The fixed reasoning control in the chat window uses Luna with medium effort for
+**Standard reasoning** and Terra with maximum effort for **Maximum reasoning**.
+The selected tier is remembered independently for each conversation.
 
 4. Build the semantic index:
 
@@ -198,9 +203,11 @@ Watched Dropbox folder behavior:
 - If no library folder override is supplied, files import under `Project Folder Name / Monitored Subfolder`
 - Project paths under a numbered `Projects` folder automatically populate structured workflow tags from the Dropbox hierarchy
 - The app scans watched folders on the configured interval and can also force-sync one folder or all folders from the UI
+- If a numbered Dropbox project folder is renamed, a missing watched path is rebound automatically only when exactly one sibling project with the same project number contains the expected subfolder; ambiguous matches remain errors
 - The watcher stores its configuration in `WATCHED_FOLDERS_PATH`, defaulting to `app/data/watched_folders.json`
 - The scheduler wakes every `WATCHED_FOLDER_POLL_SECONDS`, defaulting to `60`
 - The Document Library's **Synchronized paths** menu lists every monitored source path, its mapped library folder, schedule, last result, and management actions
+- Synchronized-folder properties include **Open source location**, which resolves the saved watcher path and opens it in the operating system's file manager
 - Already embedded files are skipped by watched-folder upload key
 - Changed files are updated in place and only changed/new documents are re-embedded
 - Online-only Dropbox/OneDrive placeholders require the desktop sync client to be running and the files to be available offline; unavailable files are reported individually without blocking readable files in the same folder

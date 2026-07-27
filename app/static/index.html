@@ -89,6 +89,17 @@
       </aside>
 
       <main class="chat-stage">
+        <button
+          id="reasoningModeButton"
+          class="reasoning-mode-button"
+          type="button"
+          aria-pressed="false"
+          aria-label="Standard reasoning"
+          title="Standard reasoning uses GPT-5.6 Luna. Click for Maximum reasoning."
+        >
+          <span class="reasoning-mode-indicator" aria-hidden="true"></span>
+          <span id="reasoningModeLabel">Standard reasoning</span>
+        </button>
         <div id="messageList" class="message-list" aria-live="polite"></div>
 
         <form id="composerForm" class="composer">
@@ -385,9 +396,12 @@
                     <h4 id="folderPropertiesTitle">Selected folder</h4>
                     <p id="folderPropertiesKind" class="mode-description">Library folder</p>
                   </div>
-                  <button id="closeFolderPropertiesButton" class="explorer-icon-button document-editor-close-button" type="button" aria-label="Close folder properties" title="Close folder properties">
-                    &times;
-                  </button>
+                  <div class="folder-properties-head-actions">
+                    <button id="openSourceLocationButton" class="secondary-button compact-button open-source-location-button is-hidden" type="button">Open source location</button>
+                    <button id="closeFolderPropertiesButton" class="explorer-icon-button document-editor-close-button" type="button" aria-label="Close folder properties" title="Close folder properties">
+                      &times;
+                    </button>
+                  </div>
                 </div>
                 <dl class="folder-property-list">
                   <div class="folder-property-row">

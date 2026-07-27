@@ -6,20 +6,23 @@ import unittest
 from unittest.mock import Mock
 
 from app.datastore import RetrievalContext
+from app.document_generator import ContextDocumentGenerator
 from app.models import Citation, ToolTrace
 from app.openai_agent import BusinessKnowledgeAgent
 
 
 class BroaderModeTests(unittest.TestCase):
     def setUp(self) -> None:
-        settings = SimpleNamespace(
+        self.settings = SimpleNamespace(
             openai_api_key="test-key",
-            openai_model="gpt-5.6-terra",
-            openai_reasoning_effort="medium",
+            openai_standard_model="gpt-5.6-luna",
+            openai_maximum_model="gpt-5.6-terra",
+            openai_standard_reasoning_effort="medium",
+            openai_maximum_reasoning_effort="max",
             openai_text_verbosity="medium",
             openai_store_responses=False,
         )
-        self.agent = BusinessKnowledgeAgent(settings, Mock(), Mock())
+        self.agent = BusinessKnowledgeAgent(self.settings, Mock(), Mock())
         self.agent._client = Mock()
         self.agent._client.responses.create.return_value = SimpleNamespace(output=[])
 
@@ -33,6 +36,43 @@ class BroaderModeTests(unittest.TestCase):
         self.agent._run_response([], "broader", context)
         broader_request = self.agent._client.responses.create.call_args.kwargs
         self.assertIn("web_search", [tool["type"] for tool in broader_request["tools"]])
+
+    def test_reasoning_mode_selects_the_validated_model_profile(self) -> None:
+        context = RetrievalContext()
+
+        self.agent._run_response([], "internal", context, "standard")
+        standard_request = self.agent._client.responses.create.call_args.kwargs
+        self.assertEqual(standard_request["model"], "gpt-5.6-luna")
+        self.assertEqual(standard_request["reasoning"], {"effort": "medium"})
+
+        self.agent._run_response([], "internal", context, "maximum")
+        maximum_request = self.agent._client.responses.create.call_args.kwargs
+        self.assertEqual(maximum_request["model"], "gpt-5.6-terra")
+        self.assertEqual(maximum_request["reasoning"], {"effort": "max"})
+
+    def test_document_generation_uses_the_selected_reasoning_profile(self) -> None:
+        generator = ContextDocumentGenerator(self.settings, Mock())
+        context = RetrievalContext()
+
+        request = generator._build_model_request(
+            source_mode="internal",
+            reasoning_mode="standard",
+            retrieval_context=context,
+            extra_instructions="Create a concise test document.",
+            user_payload={"instructions": "Test"},
+        )
+        self.assertEqual(request["model"], "gpt-5.6-luna")
+        self.assertEqual(request["reasoning"], {"effort": "medium"})
+
+        request = generator._build_model_request(
+            source_mode="internal",
+            reasoning_mode="maximum",
+            retrieval_context=context,
+            extra_instructions="Create a concise test document.",
+            user_payload={"instructions": "Test"},
+        )
+        self.assertEqual(request["model"], "gpt-5.6-terra")
+        self.assertEqual(request["reasoning"], {"effort": "max"})
 
     def test_collects_web_search_trace_and_url_citation(self) -> None:
         output_items = [
