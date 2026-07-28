@@ -204,6 +204,27 @@ class SessionManager:
             raise RuntimeError("Saved conversation storage is not configured.")
         return self._saved_conversations.delete_conversation(conversation_id)
 
+    def delete_saved_conversation_pair(
+        self,
+        conversation_id: str,
+        assistant_message_index: int,
+    ) -> SavedConversationDetail | None:
+        if self._saved_conversations is None:
+            raise RuntimeError("Saved conversation storage is not configured.")
+
+        conversation = self._saved_conversations.delete_message_pair(
+            conversation_id,
+            assistant_message_index,
+        )
+        if conversation is None:
+            return None
+
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            self._prune_locked(now)
+            self._sessions[conversation_id] = self._session_from_saved(conversation, now)
+        return conversation
+
     def _prune_locked(self, now: datetime) -> None:
         expired = [
             key
@@ -395,11 +416,14 @@ class BusinessKnowledgeAgent:
             "input": history,
             "instructions": (
                 f"{build_system_prompt(source_mode)}\n\n"
-                f"{build_context_scope_prompt(sorted(retrieval_context.folder_ids), sorted(retrieval_context.document_ids))}\n\n"
+                f"{build_context_scope_prompt(sorted(retrieval_context.folder_ids), sorted(retrieval_context.document_ids), source_mode)}\n\n"
                 "If the user asks you to create a downloadable file or business deliverable, call "
                 "`generate_context_document` instead of only describing what the file would contain."
             ),
-            "tools": [*TOOLS, WEB_SEARCH_TOOL] if source_mode == "broader" else TOOLS,
+            "tools": [
+                *([*TOOLS] if source_mode == "internal" or retrieval_context.is_active else []),
+                *([WEB_SEARCH_TOOL] if source_mode == "broader" else []),
+            ],
             "reasoning": {"effort": reasoning_profile["effort"]},
             "text": {"verbosity": self._settings.openai_text_verbosity},
             "store": self._settings.openai_store_responses,

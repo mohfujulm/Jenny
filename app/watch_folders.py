@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import base64
 import json
+import logging
 import re
 import threading
 from typing import Any, Callable
@@ -26,6 +27,9 @@ from app.ingestion import (
     DocumentIngestionService,
 )
 from app.path_tags import infer_watched_path_tags
+
+
+logger = logging.getLogger("app.pdf_ingestion")
 
 
 BINARY_WATCH_SUFFIXES = (
@@ -486,6 +490,12 @@ class WatchedFolderService:
                 try:
                     uploads.append(self._build_upload(record, source_path, pending_file))
                 except (OSError, RuntimeError, ValueError) as exc:
+                    if pending_file.path.suffix.lower() in PDF_UPLOAD_SUFFIXES:
+                        logger.error(
+                            "PDF ingestion failed before watched-folder upload: path=%s; error=%s",
+                            pending_file.relative_path,
+                            exc,
+                        )
                     file_errors.append(self._format_file_error(pending_file, exc))
 
             if uploads:

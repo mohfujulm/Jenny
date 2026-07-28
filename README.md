@@ -238,11 +238,12 @@ Tags configured on the watcher are also treated as watcher-managed auto tags. Ta
 
 Scope behavior:
 
-- If no folders or documents are selected, the assistant can use the full indexed library
+- In Global context, no folders or documents are selected by default, so internal library retrieval is not exposed
+- In Internal context, if no folders or documents are selected, the assistant can use the full indexed library
 - If folders are selected, all documents in those folders are eligible
 - If individual documents are selected, those specific documents are eligible
 - The active retrieval scope is the union of selected folders and selected documents
-- Each chat remembers its own Internal docs/Broader view mode and embedded-library scope; changing either setting keeps the current chat open, saved chats restore those choices, and new chats inherit the most recently used choices
+- Each chat remembers its own Context: Internal/Context: Global mode and embedded-library scope; changing either setting keeps the current chat open, saved chats restore those choices, and new chats start in Global context with no internal scope
 
 ## Wiring this to your team server
 

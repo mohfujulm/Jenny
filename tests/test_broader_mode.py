@@ -7,7 +7,8 @@ from unittest.mock import Mock
 
 from app.datastore import RetrievalContext
 from app.document_generator import ContextDocumentGenerator
-from app.models import Citation, ToolTrace
+from app.models import ChatRequest, Citation, DocumentGenerationRequest, ToolTrace
+from app.prompts import build_context_scope_prompt
 from app.openai_agent import BusinessKnowledgeAgent
 
 
@@ -36,6 +37,32 @@ class BroaderModeTests(unittest.TestCase):
         self.agent._run_response([], "broader", context)
         broader_request = self.agent._client.responses.create.call_args.kwargs
         self.assertIn("web_search", [tool["type"] for tool in broader_request["tools"]])
+
+    def test_global_default_does_not_expose_internal_library_tools_without_scope(self) -> None:
+        self.agent._run_response([], "broader", RetrievalContext())
+        request = self.agent._client.responses.create.call_args.kwargs
+
+        self.assertEqual([tool["type"] for tool in request["tools"]], ["web_search"])
+        self.assertIn("No internal document scope is selected", request["instructions"])
+
+    def test_global_context_can_use_internal_tools_after_explicit_scope_selection(self) -> None:
+        context = RetrievalContext.from_lists(folder_ids=["01. Project Delivery"])
+        self.agent._run_response([], "broader", context)
+        request = self.agent._client.responses.create.call_args.kwargs
+
+        self.assertIn("search_documents", [tool.get("name") for tool in request["tools"] if tool["type"] == "function"])
+        self.assertIn("web_search", [tool["type"] for tool in request["tools"]])
+
+    def test_api_defaults_use_global_context_without_a_library_scope(self) -> None:
+        self.assertEqual(ChatRequest(message="hello").source_mode, "broader")
+        self.assertEqual(
+            DocumentGenerationRequest(instructions="Draft a summary").source_mode,
+            "broader",
+        )
+        self.assertIn(
+            "No internal document scope is selected",
+            build_context_scope_prompt([], [], "broader"),
+        )
 
     def test_reasoning_mode_selects_the_validated_model_profile(self) -> None:
         context = RetrievalContext()

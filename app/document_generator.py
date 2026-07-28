@@ -70,6 +70,10 @@ class ContextDocumentGenerator:
             folder_ids=context_filter.folder_ids,
             document_ids=context_filter.document_ids,
         )
+        if source_mode == "broader" and not retrieval_context.is_active:
+            raise ValueError(
+                "Select Context: Internal or choose a library scope before generating from internal documents."
+            )
         supporting_documents, citations = self._collect_supporting_documents(
             query=f"{normalized_title}\n{normalized_instructions}".strip(),
             retrieval_context=retrieval_context,
@@ -301,7 +305,7 @@ class ContextDocumentGenerator:
             ],
             "instructions": (
                 f"{build_system_prompt(source_mode)}\n\n"
-                f"{build_context_scope_prompt(sorted(retrieval_context.folder_ids), sorted(retrieval_context.document_ids))}\n\n"
+                f"{build_context_scope_prompt(sorted(retrieval_context.folder_ids), sorted(retrieval_context.document_ids), source_mode)}\n\n"
                 f"{extra_instructions}"
             ),
             "reasoning": {"effort": reasoning_profile["effort"]},

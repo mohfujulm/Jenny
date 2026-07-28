@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import platform
 from pathlib import Path
 import subprocess
@@ -22,6 +23,7 @@ from app.models import (
     ChatResponse,
     ConversationDeleteResponse,
     ConversationListResponse,
+    ConversationPairDeleteResponse,
     ConversationSaveRequest,
     ConversationSaveResponse,
     ConversationSettingsRequest,
@@ -68,7 +70,11 @@ from app.ocr import get_ocr_runtime_status
 from app.reasoning_profiles import get_chat_reasoning_profiles
 
 
+pdf_logger = logging.getLogger("app.pdf_ingestion")
 settings = get_settings()
+pdf_ocr_status = get_ocr_runtime_status(settings)
+if pdf_ocr_status["enabled"] and not pdf_ocr_status["available"]:
+    pdf_logger.error("PDF OCR is unavailable at startup: %s", pdf_ocr_status["detail"])
 document_store = build_document_store(settings)
 ingestion_service = DocumentIngestionService(settings)
 watch_folder_service = WatchedFolderService(settings, ingestion_service)
@@ -645,6 +651,40 @@ def update_conversation_settings(
         raise HTTPException(
             status_code=500,
             detail="Unexpected server error while updating conversation settings.",
+        ) from exc
+
+
+@app.delete(
+    "/api/conversations/{conversation_id}/pairs/{assistant_message_index}",
+    response_model=ConversationPairDeleteResponse,
+)
+def delete_conversation_pair(
+    conversation_id: str,
+    assistant_message_index: int,
+) -> ConversationPairDeleteResponse:
+    try:
+        conversation = session_manager.delete_saved_conversation_pair(
+            conversation_id,
+            assistant_message_index,
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Saved conversation not found.")
+        return ConversationPairDeleteResponse(
+            conversation_id=conversation_id,
+            deleted=True,
+            message="Question and response deleted from saved conversation.",
+            conversation=conversation,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Unexpected server error while deleting the question and response.",
         ) from exc
 
 

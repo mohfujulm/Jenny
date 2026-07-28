@@ -51,55 +51,48 @@
         </div>
 
         <div class="panel">
-          <h2>Source Mode</h2>
-          <div class="mode-toggle" role="group" aria-label="Source preference">
-            <button
-              class="mode-button is-active"
-              type="button"
-              data-source-mode="internal"
-            >
-              Internal docs
-            </button>
-            <button
-              class="mode-button"
-              type="button"
-              data-source-mode="broader"
-            >
-              Broader view
-            </button>
-          </div>
-          <p id="modeDescription" class="mode-description">
-            Prioritizes internal documents and avoids filling gaps with general knowledge.
-          </p>
-        </div>
-
-        <div class="panel">
           <div class="panel-head">
             <h2>Context Scope</h2>
           </div>
           <p id="contextSummary" class="mode-description">
-            All indexed documents are currently available for retrieval.
+            No internal document scope selected. Global context is active.
           </p>
           <div id="contextChipList" class="context-chip-list"></div>
-          <button id="clearContextButton" class="secondary-button compact-button" type="button">
-            Use all docs
-          </button>
         </div>
 
       </aside>
 
       <main class="chat-stage">
-        <button
-          id="reasoningModeButton"
-          class="reasoning-mode-button"
-          type="button"
-          aria-pressed="false"
-          aria-label="Standard reasoning"
-          title="Standard reasoning uses GPT-5.6 Luna. Click for Maximum reasoning."
-        >
-          <span class="reasoning-mode-indicator" aria-hidden="true"></span>
-          <span id="reasoningModeLabel">Standard reasoning</span>
-        </button>
+        <div class="chat-mode-controls" aria-label="Chat settings">
+          <button
+            id="sourceModeButton"
+            class="source-mode-button"
+            type="button"
+            aria-pressed="true"
+            aria-label="Context: Global"
+            title="Context: Global is active. Click for Context: Internal."
+          >
+            <span class="source-mode-indicator" aria-hidden="true"></span>
+            <span id="sourceModeLabel">Context: Global</span>
+          </button>
+          <button
+            id="reasoningModeButton"
+            class="reasoning-mode-button"
+            type="button"
+            aria-pressed="false"
+            aria-label="Standard reasoning"
+            title="Standard reasoning uses GPT-5.6 Luna. Click for Maximum reasoning."
+          >
+            <span class="reasoning-mode-indicator" aria-hidden="true"></span>
+            <svg class="reasoning-mode-rpm-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M4 16a8 8 0 0 1 16 0"></path>
+              <path d="M12 16l4.3-5.1"></path>
+              <path d="M7 13.5l1.2.8M12 11.5v1.5M17 13.5l-1.2.8"></path>
+              <path d="M6 19h12"></path>
+            </svg>
+            <span id="reasoningModeLabel">Standard reasoning</span>
+          </button>
+        </div>
         <div id="messageList" class="message-list" aria-live="polite"></div>
 
         <form id="composerForm" class="composer">
@@ -147,7 +140,7 @@
           <button id="closeBrowserButton" class="ghost-button" type="button">Close</button>
         </div>
 
-        <div class="browser-body">
+        <div id="browserBody" class="browser-body">
           <section class="browser-scope">
             <div class="browser-pane-head">
               <p class="eyebrow">Scope</p>
@@ -161,26 +154,20 @@
               <div class="scope-card-head">
                 <h4>Scope Controls</h4>
                 <p id="scopeInventorySummary" class="mode-description">
-                  All indexed documents are currently available for retrieval.
+                  Global context is active; no internal documents are selected.
                 </p>
-              </div>
-              <div class="scope-action-row">
-                <button id="applyContextButton" class="primary-button" type="button">Apply scope</button>
-                <button id="browserUseAllButton" class="secondary-button compact-button" type="button">
-                  Use all docs
-                </button>
               </div>
               <div class="scope-status-grid">
                 <div class="scope-status-card">
                   <span class="field-label">Applied now</span>
                   <p id="scopeAppliedSummary" class="scope-status-copy">
-                    All indexed documents are currently available for retrieval.
+                    Applied: global context is active; no internal documents are selected.
                   </p>
                 </div>
                 <div class="scope-status-card">
-                  <span class="field-label">Draft in browser</span>
+                  <span class="field-label">Selected scope</span>
                   <p id="scopeDraftSummary" class="scope-status-copy">
-                    All indexed documents are currently selected in this browser view.
+                    Draft: global context is active; no internal documents are selected.
                   </p>
                 </div>
               </div>
@@ -200,7 +187,7 @@
               <div class="scope-card-head">
                 <h4>Outside Scope</h4>
                 <p class="mode-description">
-                  A quick view of folders still excluded from the active draft scope.
+                  A quick view of folders still excluded from the active scope.
                 </p>
               </div>
               <div id="scopeExcludedList" class="scope-item-list scope-item-list-muted"></div>
@@ -534,17 +521,45 @@
             </div>
           </section>
 
-          <section class="browser-preview">
-            <div id="previewEmpty" class="preview-empty">
-              Select a document to preview its indexed content and metadata.
+          <section id="browserPreviewPanel" class="browser-preview">
+            <header class="preview-panel-head">
+              <div class="preview-panel-copy">
+                <p class="eyebrow">Document Preview</p>
+                <h4 id="previewPanelTitle">Document preview</h4>
+              </div>
+              <div class="preview-panel-actions">
+                <button
+                  id="minimizePreviewButton"
+                  class="explorer-icon-button"
+                  type="button"
+                  aria-label="Minimize document preview"
+                  title="Minimize document preview"
+                >
+                  −
+                </button>
+                <button
+                  id="closePreviewButton"
+                  class="explorer-icon-button"
+                  type="button"
+                  aria-label="Close document preview"
+                  title="Close document preview"
+                >
+                  &times;
+                </button>
+              </div>
+            </header>
+            <div id="previewContent" class="preview-content">
+              <div id="previewEmpty" class="preview-empty">
+                Select a document to preview its indexed content and metadata.
+              </div>
+              <article id="previewCard" class="preview-card is-hidden">
+                <div id="previewBadges" class="preview-badges"></div>
+                <h3 id="previewTitle"></h3>
+                <div id="previewSummary" class="preview-summary"></div>
+                <div id="previewMeta" class="preview-meta-line"></div>
+                <div id="previewText" class="preview-text"></div>
+              </article>
             </div>
-            <article id="previewCard" class="preview-card is-hidden">
-              <div id="previewBadges" class="preview-badges"></div>
-              <h3 id="previewTitle"></h3>
-              <div id="previewSummary" class="preview-summary"></div>
-              <div id="previewMeta" class="preview-meta-line"></div>
-              <div id="previewText" class="preview-text"></div>
-            </article>
           </section>
         </div>
         <div id="synchronizedPathsMenu" class="synchronized-paths-menu is-hidden" aria-hidden="true">

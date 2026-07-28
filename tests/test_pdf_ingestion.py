@@ -139,11 +139,15 @@ class PdfIngestionTests(unittest.TestCase):
             )
 
     def test_rejects_invalid_pdf(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not a valid PDF"):
-            self.service._extract_pdf_document_text(
-                filename="broken.pdf",
-                content_bytes=b"not a pdf",
-            )
+        with self.assertLogs("app.pdf_ingestion", level="ERROR") as logs:
+            with self.assertRaisesRegex(ValueError, "not a valid PDF"):
+                self.service._extract_pdf_document_text(
+                    filename="broken.pdf",
+                    content_bytes=b"not a pdf",
+                )
+
+        self.assertIn("PDF ingestion failed", "\n".join(logs.output))
+        self.assertIn("broken.pdf", "\n".join(logs.output))
 
     def test_pdf_requires_binary_content_even_if_text_is_supplied(self) -> None:
         with self.assertRaisesRegex(ValueError, "did not include binary content"):
