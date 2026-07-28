@@ -21,7 +21,7 @@ class ContextFilter(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str | None = None
     message: str = Field(min_length=1, max_length=8000)
-    source_mode: SourceMode = "internal"
+    source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
 
@@ -62,7 +62,7 @@ class ChatResponse(BaseModel):
     citations: list[Citation]
     tool_trace: list[ToolTrace]
     generated_document: GeneratedChatDocument | None = None
-    source_mode: SourceMode
+    source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode
     context_filter: ContextFilter
 
@@ -121,6 +121,13 @@ class ConversationDeleteResponse(BaseModel):
     conversation_id: str
     deleted: bool
     message: str
+
+
+class ConversationPairDeleteResponse(BaseModel):
+    conversation_id: str
+    deleted: bool
+    message: str
+    conversation: SavedConversationDetail
 
 
 class FolderSummary(BaseModel):
@@ -293,7 +300,7 @@ class DocumentGenerationRequest(BaseModel):
     instructions: str = Field(min_length=1, max_length=12000)
     title: str | None = Field(default=None, max_length=160)
     output_format: GeneratedDocumentFormat = "docx"
-    source_mode: SourceMode = "internal"
+    source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
 
@@ -415,7 +422,7 @@ class SessionState:
     conversation_id: str
     history: list[Any] = field(default_factory=list)
     transcript: list[ConversationMessage] = field(default_factory=list)
-    source_mode: SourceMode = "internal"
+    source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = field(default_factory=ContextFilter)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

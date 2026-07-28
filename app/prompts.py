@@ -37,10 +37,11 @@ In this mode:
 - Avoid filling internal knowledge gaps with general background unless the user explicitly asks for a broader perspective.
 """.strip(),
     "broader": """
-Source preference mode: internal documents plus broader public knowledge.
+Source preference mode: global context.
 
 In this mode:
-- Still use internal document tools for company-specific questions, policies, procedures, and retained decisions.
+- Prefer general knowledge and live web search for public or current questions.
+- Do not use internal document tools unless the user explicitly selects Context: Internal or a library scope.
 - Use live web search for current, recent, public, or external information and whenever fresh sources would improve the answer.
 - You may also supplement with general model knowledge when current web information is not needed.
 - Clearly distinguish internal-document facts from public web findings or general background.
@@ -54,8 +55,17 @@ def build_system_prompt(source_mode: SourceMode) -> str:
     return f"{BASE_SYSTEM_PROMPT}\n\n{MODE_PROMPTS[source_mode]}"
 
 
-def build_context_scope_prompt(folder_ids: list[str], document_ids: list[str]) -> str:
+def build_context_scope_prompt(
+    folder_ids: list[str],
+    document_ids: list[str],
+    source_mode: SourceMode = "internal",
+) -> str:
     if not folder_ids and not document_ids:
+        if source_mode == "broader":
+            return (
+                "No internal document scope is selected. Use global context by default; do not call "
+                "internal document tools unless the user explicitly selects Context: Internal or a library scope."
+            )
         return "Active internal context scope: all available indexed documents."
 
     lines = [

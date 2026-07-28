@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 import hashlib
 import json
+import logging
 import posixpath
 import re
 import threading
@@ -34,6 +35,9 @@ from app.datastore import (
     write_folder_registry,
     write_json_documents,
 )
+
+
+logger = logging.getLogger("app.pdf_ingestion")
 
 
 TEXT_UPLOAD_SUFFIXES = {
@@ -1169,14 +1173,48 @@ class DocumentIngestionService:
     def _decode_base64_content(self, content_base64: str | None, *, filename: str) -> bytes:
         normalized = str(content_base64 or "").strip()
         if not normalized:
+            if Path(filename).suffix.lower() in PDF_UPLOAD_SUFFIXES:
+                logger.error("PDF ingestion failed: filename=%s; binary content was missing.", filename)
             raise ValueError(f"Uploaded file `{filename}` did not include binary content.")
 
         try:
             return base64.b64decode(normalized, validate=True)
         except (ValueError, binascii.Error) as exc:
+            if Path(filename).suffix.lower() in PDF_UPLOAD_SUFFIXES:
+                logger.error(
+                    "PDF ingestion failed: filename=%s; binary content was not valid base64.",
+                    filename,
+                )
             raise ValueError(f"Uploaded file `{filename}` contained invalid binary content.") from exc
 
     def _extract_pdf_document_text(self, *, filename: str, content_bytes: bytes) -> str:
+        try:
+            return self._extract_pdf_document_text_impl(
+                filename=filename,
+                content_bytes=content_bytes,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.error(
+                "PDF ingestion failed: filename=%s; byte_count=%d; error=%s",
+                filename,
+                len(content_bytes),
+                exc,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                "Unexpected PDF ingestion failure: filename=%s; byte_count=%d.",
+                filename,
+                len(content_bytes),
+            )
+            raise
+
+    def _extract_pdf_document_text_impl(self, *, filename: str, content_bytes: bytes) -> str:
+        logger.info(
+            "PDF ingestion started: filename=%s; byte_count=%d.",
+            filename,
+            len(content_bytes),
+        )
         try:
             reader = PdfReader(io.BytesIO(content_bytes))
         except (PyPdfError, EOFError, OSError, ValueError) as exc:
@@ -1229,6 +1267,12 @@ class DocumentIngestionService:
                         "Image-only PDFs require OCR, but PDF OCR is disabled."
                     )
             else:
+                logger.warning(
+                    "PDF OCR required: filename=%s; page_count=%d; pages=%s.",
+                    filename,
+                    page_count,
+                    ",".join(str(page_number) for page_number in pages_requiring_ocr),
+                )
                 ocr_text_by_number = self._ocr_pdf_pages(
                     filename=filename,
                     content_bytes=content_bytes,
@@ -1250,6 +1294,13 @@ class DocumentIngestionService:
                 f"Uploaded PDF `{filename}` contains no extractable text. "
                 "OCR ran but did not recognize any text."
             )
+        logger.info(
+            "PDF ingestion completed: filename=%s; page_count=%d; ocr_page_count=%d; extracted_character_count=%d.",
+            filename,
+            page_count,
+            len(pages_requiring_ocr),
+            len(combined),
+        )
         return combined
 
     def _ocr_pdf_pages(
@@ -1268,6 +1319,13 @@ class DocumentIngestionService:
 
         dpi = min(600, max(72, int(self._pdf_ocr_setting("pdf_ocr_dpi", 300))))
         provider = self._get_ocr_provider()
+        logger.info(
+            "PDF OCR started: filename=%s; pages=%s; engine=%s; dpi=%d.",
+            filename,
+            ",".join(str(page_number) for page_number in page_numbers),
+            getattr(provider, "name", type(provider).__name__),
+            dpi,
+        )
 
         try:
             document = pdfium.PdfDocument(content_bytes)
@@ -1306,6 +1364,22 @@ class DocumentIngestionService:
         finally:
             document.close()
 
+        empty_pages = [
+            str(page_number)
+            for page_number, text in extracted.items()
+            if not text.strip()
+        ]
+        if empty_pages:
+            logger.warning(
+                "PDF OCR returned no text: filename=%s; pages=%s.",
+                filename,
+                ",".join(empty_pages),
+            )
+        logger.info(
+            "PDF OCR completed: filename=%s; recognized_page_count=%d.",
+            filename,
+            sum(bool(text.strip()) for text in extracted.values()),
+        )
         return extracted
 
     def _get_ocr_provider(self) -> OcrProvider:

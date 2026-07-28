@@ -88,6 +88,45 @@ class SavedConversationStore:
                 self._write_conversations_locked(next_conversations)
         return deleted
 
+    def delete_message_pair(
+        self,
+        conversation_id: str,
+        assistant_message_index: int,
+    ) -> SavedConversationDetail | None:
+        with self._lock:
+            conversations = self._load_conversations_locked()
+            conversation = next(
+                (item for item in conversations if item.conversation_id == conversation_id),
+                None,
+            )
+            if conversation is None:
+                return None
+
+            messages = conversation.messages
+            if assistant_message_index < 1 or assistant_message_index >= len(messages):
+                raise ValueError("Selected response pair is not valid.")
+            if (
+                messages[assistant_message_index].role != "assistant"
+                or messages[assistant_message_index - 1].role != "user"
+            ):
+                raise ValueError("Selected message is not a complete question/response pair.")
+
+            conversation.messages = [
+                message
+                for index, message in enumerate(messages)
+                if index not in {assistant_message_index - 1, assistant_message_index}
+            ]
+            conversation.message_count = len(conversation.messages)
+            conversation.summary = self._resolve_summary(conversation.messages)
+            conversation.updated_at = datetime.now(timezone.utc).isoformat()
+            next_conversations = [
+                item for item in conversations if item.conversation_id != conversation_id
+            ]
+            next_conversations.append(conversation)
+            next_conversations.sort(key=lambda item: item.updated_at, reverse=True)
+            self._write_conversations_locked(next_conversations)
+        return _copy_conversation(conversation)
+
     def _load_conversations_locked(self) -> list[SavedConversationDetail]:
         if not self._path.exists():
             return []

@@ -85,6 +85,47 @@ class ConversationPreferenceTests(unittest.TestCase):
         self.assertEqual(saved.reasoning_mode, "maximum")
         self.assertEqual(saved.context_filter.folder_ids, ["Project Delivery"])
 
+    def test_delete_message_pair_removes_it_from_saved_chat_and_active_session(self) -> None:
+        conversation_id = "chat-delete-pair"
+        self._add_user_message(conversation_id, "Keep this question")
+        session = self.manager.get_or_create(conversation_id)
+        session.history.append({"role": "assistant", "content": "Keep this answer"})
+        session.transcript.append(
+            ConversationMessage(role="assistant", label="Assistant", body="Keep this answer")
+        )
+        self._add_user_message(conversation_id, "Remove this question")
+        session = self.manager.get_or_create(conversation_id)
+        session.history.append({"role": "assistant", "content": "Remove this answer"})
+        session.transcript.append(
+            ConversationMessage(role="assistant", label="Assistant", body="Remove this answer")
+        )
+        self.manager.save_conversation(conversation_id)
+
+        deleted = self.manager.delete_saved_conversation_pair(conversation_id, 3)
+
+        self.assertIsNotNone(deleted)
+        self.assertEqual(deleted.message_count, 2)
+        self.assertEqual([message.body for message in deleted.messages], [
+            "Keep this question",
+            "Keep this answer",
+        ])
+        reloaded = self.store.get_conversation(conversation_id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.message_count, 2)
+        active = self.manager.get_or_create(conversation_id)
+        self.assertEqual([message.body for message in active.transcript], [
+            "Keep this question",
+            "Keep this answer",
+        ])
+
+    def test_delete_message_pair_rejects_an_invalid_message_index(self) -> None:
+        conversation_id = "chat-delete-pair-invalid"
+        self._add_user_message(conversation_id)
+        self.manager.save_conversation(conversation_id)
+
+        with self.assertRaises(ValueError):
+            self.manager.delete_saved_conversation_pair(conversation_id, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

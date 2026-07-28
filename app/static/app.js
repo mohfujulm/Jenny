@@ -7,11 +7,11 @@ const modeCopy = {
   },
   broader: {
     description:
-      "Still checks internal documents, and can search the public web for current broader context.",
+      "Uses global knowledge and public web context without an active internal document scope.",
     composerNote:
-      "Uses internal docs when relevant and visibly cites public web sources when it searches.",
+      "Global context is active. Choose Context: Internal to use library documents.",
     intro:
-      "Ask for internal answers, current public information, or broader explainers. The assistant can combine internal sources with cited web research when helpful.",
+      "Ask for general knowledge, current public information, or broader explainers. Choose Context: Internal when you want an answer grounded in library documents.",
   },
 };
 
@@ -19,12 +19,20 @@ const CHAT_PREFERENCES_STORAGE_KEY = "business-knowledge-chat-preferences-v1";
 const MAX_STORED_CHAT_PREFERENCES = 100;
 const CHAT_SCROLL_STORAGE_KEY = "business-knowledge-chat-scroll-positions-v1";
 const MAX_STORED_CHAT_SCROLL_POSITIONS = 100;
+const FOLDER_DOUBLE_CLICK_WINDOW_MS = 650;
 const conversationPreferenceSyncTimers = new Map();
 let conversationScrollSaveTimer = null;
+let lastFolderControlClick = {
+  folderId: null,
+  control: null,
+  clickedAt: 0,
+  x: 0,
+  y: 0,
+};
 
 const state = {
   conversationId: crypto.randomUUID(),
-  sourceMode: "internal",
+  sourceMode: "broader",
   reasoningMode: "standard",
   sending: false,
   responseIndicatorNode: null,
@@ -37,6 +45,13 @@ const state = {
     saveInFlight: false,
     renameInFlightId: null,
     deleteInFlightId: null,
+    pairDeleteInFlightIndex: null,
+    messageActionMenu: {
+      open: false,
+      messageIndex: null,
+      node: null,
+      button: null,
+    },
     restoringScrollPosition: false,
     contextMenu: {
       open: false,
@@ -62,6 +77,7 @@ const state = {
     collapseFoldersOnLoad: false,
     dragPayload: null,
     previewDocumentId: null,
+    previewPanelState: "open",
     previewCache: {},
     uploadInFlight: false,
     metadataUpdateInFlight: false,
@@ -102,6 +118,8 @@ const messageList = document.getElementById("messageList");
 const composerForm = document.getElementById("composerForm");
 const messageInput = document.getElementById("messageInput");
 const sendButton = document.getElementById("sendButton");
+const sourceModeButton = document.getElementById("sourceModeButton");
+const sourceModeLabel = document.getElementById("sourceModeLabel");
 const reasoningModeButton = document.getElementById("reasoningModeButton");
 const reasoningModeLabel = document.getElementById("reasoningModeLabel");
 const newConversationButton = document.getElementById("newConversationButton");
@@ -115,12 +133,9 @@ const savedConversationDeleteButton = document.getElementById("savedConversation
 const statusPill = document.getElementById("statusPill");
 const messageTemplate = document.getElementById("messageTemplate");
 const composerNote = document.getElementById("composerNote");
-const modeDescription = document.getElementById("modeDescription");
-const modeButtons = Array.from(document.querySelectorAll("[data-source-mode]"));
 const contextSummary = document.getElementById("contextSummary");
 const contextChipList = document.getElementById("contextChipList");
 const openLibraryButton = document.getElementById("openLibraryButton");
-const clearContextButton = document.getElementById("clearContextButton");
 const documentGenerationForm = document.getElementById("documentGenerationForm");
 const documentGenerationTitleInput = document.getElementById("documentGenerationTitleInput");
 const documentGenerationFormatSelect = document.getElementById("documentGenerationFormatSelect");
@@ -129,6 +144,12 @@ const documentGenerationStatus = document.getElementById("documentGenerationStat
 const generateDocumentButton = document.getElementById("generateDocumentButton");
 const documentBrowser = document.getElementById("documentBrowser");
 const closeBrowserButton = document.getElementById("closeBrowserButton");
+const browserBody = document.getElementById("browserBody");
+const browserPreviewPanel = document.getElementById("browserPreviewPanel");
+const previewPanelTitle = document.getElementById("previewPanelTitle");
+const minimizePreviewButton = document.getElementById("minimizePreviewButton");
+const closePreviewButton = document.getElementById("closePreviewButton");
+const previewContent = document.getElementById("previewContent");
 const browserStats = document.getElementById("browserStats");
 const scopeInventorySummary = document.getElementById("scopeInventorySummary");
 const scopeAppliedSummary = document.getElementById("scopeAppliedSummary");
@@ -137,8 +158,6 @@ const scopeIncludedList = document.getElementById("scopeIncludedList");
 const scopeExcludedList = document.getElementById("scopeExcludedList");
 const folderTreeList = document.getElementById("folderTreeList");
 const folderTreeSurface = folderTreeList.parentElement;
-const applyContextButton = document.getElementById("applyContextButton");
-const browserUseAllButton = document.getElementById("browserUseAllButton");
 const deleteSelectedButton = document.getElementById("deleteSelectedButton");
 const explorerRootButton = document.getElementById("explorerRootButton");
 const explorerExpandAllButton = document.getElementById("explorerExpandAllButton");
@@ -588,7 +607,7 @@ function normalizeConversationPreferences(preferences) {
     ? preferences.contextFilter
     : {};
   return {
-    sourceMode: preferences && preferences.sourceMode === "broader" ? "broader" : "internal",
+    sourceMode: preferences && preferences.sourceMode === "internal" ? "internal" : "broader",
     reasoningMode:
       preferences && preferences.reasoningMode === "maximum" ? "maximum" : "standard",
     contextFilter: {
@@ -673,9 +692,12 @@ function rememberConversationPreferences(conversationId, preferences = getCurren
   return normalized;
 }
 
-function getLastUsedConversationPreferences() {
-  const store = readConversationPreferenceStore();
-  return normalizeConversationPreferences(store.lastUsed || {});
+function getDefaultConversationPreferences() {
+  return normalizeConversationPreferences({
+    sourceMode: "broader",
+    reasoningMode: "standard",
+    contextFilter: { folderIds: [], documentIds: [] },
+  });
 }
 
 function resolveSavedConversationPreferences(payload) {
@@ -1334,10 +1356,90 @@ function toggleFolderCollapsed(pathId) {
   renderFolderTree();
 }
 
-function getAllLibraryFolderPathIds() {
-  return normalizeItems(
-    state.library.folders.map((item) => normalizeFolderPath(item.folder_id)).filter(Boolean)
+function expandFolderAndDescendants(pathId) {
+  const normalizedPathId = normalizeFolderPath(pathId);
+  if (!normalizedPathId) {
+    return;
+  }
+
+  const descendantIds = new Set([normalizedPathId]);
+  getAllLibraryFolderPathIds().forEach((folderId) => {
+    if (folderId === normalizedPathId || folderId.startsWith(`${normalizedPathId}/`)) {
+      descendantIds.add(folderId);
+    }
+  });
+
+  state.library.collapsedFolderIds = normalizeItems(
+    state.library.collapsedFolderIds.filter((folderId) => !descendantIds.has(folderId))
   );
+  renderFolderTree();
+}
+
+function handleFolderControlClick(event) {
+  if (event.detail === 0) {
+    return;
+  }
+
+  const folderMain = event.target.closest(".folder-tree-main");
+  if (!folderMain || !folderTreeList.contains(folderMain)) {
+    return;
+  }
+
+  const folderRow = folderMain.closest(".folder-tree-row");
+  const folderId = normalizeFolderPath(folderRow ? folderRow.dataset.folderId : "");
+  if (!folderId) {
+    return;
+  }
+
+  const control = event.target.closest(".folder-expand-button") ? "toggle" : "entry";
+  const clickedAt = window.performance.now();
+  const elapsed = clickedAt - lastFolderControlClick.clickedAt;
+  const pointerDistance = Math.hypot(
+    event.clientX - lastFolderControlClick.x,
+    event.clientY - lastFolderControlClick.y
+  );
+  const isDoubleClick =
+    lastFolderControlClick.folderId === folderId &&
+    lastFolderControlClick.control === control &&
+    elapsed > 0 &&
+    elapsed <= FOLDER_DOUBLE_CLICK_WINDOW_MS &&
+    pointerDistance <= 16;
+
+  lastFolderControlClick = isDoubleClick
+    ? {
+        folderId: null,
+        control: null,
+        clickedAt: 0,
+        x: 0,
+        y: 0,
+      }
+    : {
+        folderId,
+        control,
+        clickedAt,
+        x: event.clientX,
+        y: event.clientY,
+      };
+
+  if (!isDoubleClick) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  expandFolderAndDescendants(folderId);
+}
+
+function getAllLibraryFolderPathIds() {
+  const pathIds = [];
+  state.library.folders.forEach((item) => {
+    let currentPath = "";
+    getFolderSegments(item.folder_id).forEach((segment) => {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      pathIds.push(currentPath);
+    });
+  });
+  return normalizeItems(pathIds);
 }
 
 function setAllFoldersCollapsed(isCollapsed) {
@@ -1349,12 +1451,20 @@ function setAllFoldersCollapsed(isCollapsed) {
   renderFolderTree();
 }
 
-function setActiveFolder(pathId) {
+function setActiveFolder(pathId, options = {}) {
+  const { renderTree = true } = options;
   state.library.activeFolderId = pathId;
   state.library.previewDocumentId = null;
   state.library.editorDismissed = false;
   renderBrowserStats();
-  renderFolderTree();
+  if (renderTree) {
+    renderFolderTree();
+  } else {
+    folderTreeList.querySelectorAll(".folder-tree-row").forEach((row) => {
+      const rowFolderId = row.dataset.folderId || null;
+      row.classList.toggle("is-active", rowFolderId === state.library.activeFolderId);
+    });
+  }
   renderLibraryBreadcrumbs();
   renderDocumentFileList();
   renderDocumentEditor();
@@ -1458,6 +1568,52 @@ function normalizeConversationMessage(message) {
         : message && message.generated_document
           ? { ...message.generated_document }
           : null,
+  };
+}
+
+function closeMessageActionMenu() {
+  const menuState = state.memory.messageActionMenu;
+  if (menuState.button) {
+    menuState.button.setAttribute("aria-expanded", "false");
+  }
+  if (menuState.node) {
+    menuState.node.remove();
+  }
+  state.memory.messageActionMenu = {
+    open: false,
+    messageIndex: null,
+    node: null,
+    button: null,
+  };
+}
+
+function openMessageActionMenu({ messageIndex, assistantMessageIndex, button, messageNode }) {
+  closeMessageActionMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "message-actions-menu";
+  menu.setAttribute("role", "menu");
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "message-actions-menu-item message-actions-menu-item-danger";
+  deleteButton.textContent = "Delete chat entry";
+  deleteButton.setAttribute("role", "menuitem");
+  deleteButton.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    closeMessageActionMenu();
+    await deleteSavedConversationPair(assistantMessageIndex);
+  });
+  menu.appendChild(deleteButton);
+  messageNode.appendChild(menu);
+  deleteButton.focus();
+
+  button.setAttribute("aria-expanded", "true");
+  state.memory.messageActionMenu = {
+    open: true,
+    messageIndex,
+    node: menu,
+    button,
   };
 }
 
@@ -1798,8 +1954,10 @@ function renderMarkdown(markdown) {
 
 function renderMessage(message, options = {}) {
   const normalized = normalizeConversationMessage(message);
+  let messageIndex = null;
   if (options.persist !== false) {
     state.messages.push(normalized);
+    messageIndex = state.messages.length - 1;
   }
 
   const node = messageTemplate.content.firstElementChild.cloneNode(true);
@@ -1873,6 +2031,56 @@ function renderMessage(message, options = {}) {
     footer.appendChild(citationList);
   }
 
+  const savedConversation = getSavedConversationSummary(state.conversationId);
+  const isSavedConversation = Boolean(savedConversation);
+  const isPersistedMessage =
+    isSavedConversation &&
+    messageIndex !== null &&
+    messageIndex < Number(savedConversation.message_count || 0);
+  let pairAssistantMessageIndex = null;
+  if (isPersistedMessage && normalized.role === "assistant") {
+    if (messageIndex > 0 && state.messages[messageIndex - 1]?.role === "user") {
+      pairAssistantMessageIndex = messageIndex;
+    }
+  } else if (isPersistedMessage && normalized.role === "user") {
+    if (state.messages[messageIndex + 1]?.role === "assistant") {
+      pairAssistantMessageIndex = messageIndex + 1;
+    }
+  }
+  if (pairAssistantMessageIndex !== null) {
+    node.classList.add("has-message-actions");
+    const messageActionsButton = document.createElement("button");
+    messageActionsButton.type = "button";
+    messageActionsButton.className = "message-actions-button";
+    messageActionsButton.textContent = "⋯";
+    messageActionsButton.setAttribute(
+      "aria-label",
+      "More chat entry actions"
+    );
+    messageActionsButton.setAttribute("aria-haspopup", "menu");
+    messageActionsButton.setAttribute("aria-expanded", "false");
+    messageActionsButton.title = "More chat entry actions";
+    messageActionsButton.disabled =
+      state.memory.pairDeleteInFlightIndex !== null ||
+      state.sending ||
+      state.memory.saveInFlight;
+    messageActionsButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const menuState = state.memory.messageActionMenu;
+      if (menuState.open && menuState.messageIndex === messageIndex) {
+        closeMessageActionMenu();
+        return;
+      }
+      openMessageActionMenu({
+        messageIndex,
+        assistantMessageIndex: pairAssistantMessageIndex,
+        button: messageActionsButton,
+        messageNode: node,
+      });
+    });
+    node.insertBefore(messageActionsButton, node.firstChild);
+  }
+
   messageList.appendChild(node);
   if (options.scrollToLatest !== false) {
     messageList.scrollTop = messageList.scrollHeight;
@@ -1930,9 +2138,11 @@ async function openCitationDocument(citation) {
 
 function setComposerState(isSending) {
   state.sending = isSending;
-  sendButton.disabled = isSending;
-  messageInput.disabled = isSending;
-  reasoningModeButton.disabled = isSending;
+  const composerBusy = isSending || state.memory.pairDeleteInFlightIndex !== null;
+  sendButton.disabled = composerBusy;
+  messageInput.disabled = composerBusy;
+  sourceModeButton.disabled = composerBusy;
+  reasoningModeButton.disabled = composerBusy;
   sendButton.textContent = isSending ? "Sending..." : "Send";
   renderConversationSaveButton();
 }
@@ -2785,6 +2995,9 @@ function closeDocumentEditor() {
 function buildScopeLabel() {
   const { folderIds, documentIds } = state.library.appliedContext;
   if (folderIds.length === 0 && documentIds.length === 0) {
+    if (state.sourceMode === "broader") {
+      return "No internal document scope is selected. Global context is active.";
+    }
     return "Current scope: all indexed documents are available for retrieval.";
   }
 
@@ -2811,7 +3024,9 @@ function renderContextSummary() {
 
   contextSummary.textContent =
     state.library.appliedContext.folderIds.length === 0 && state.library.appliedContext.documentIds.length === 0
-      ? "All indexed documents are currently available for retrieval."
+      ? state.sourceMode === "broader"
+        ? "No internal document scope selected. Global context is active."
+        : "All indexed documents are currently available for retrieval."
       : buildScopeLabel();
 
   contextChipList.innerHTML = "";
@@ -2848,6 +3063,9 @@ function buildScopeStatusText(context, coverage, audienceLabel) {
   }
 
   if (context.folderIds.length === 0 && context.documentIds.length === 0) {
+    if (state.sourceMode === "broader") {
+      return `${audienceLabel}: global context is active; no internal documents are selected.`;
+    }
     return `${audienceLabel}: all ${state.library.totalDocuments} indexed document${state.library.totalDocuments === 1 ? "" : "s"} are available.`;
   }
 
@@ -2919,17 +3137,16 @@ function renderScopePane() {
 
   const appliedCoverage = getScopeCoverage(state.library.appliedContext);
   const draftCoverage = getScopeCoverage(state.library.draftContext);
-  const draftChanged = !contextFiltersEqual(state.library.draftContext, state.library.appliedContext);
-
   scopeInventorySummary.textContent =
-    draftCoverage.excludedDocuments.length === 0
-      ? "Everything in the indexed library is currently in scope."
-      : `${draftCoverage.includedDocuments.length} document${draftCoverage.includedDocuments.length === 1 ? "" : "s"} in scope, ${draftCoverage.excludedDocuments.length} outside scope.`;
+    state.sourceMode === "broader" &&
+    state.library.draftContext.folderIds.length === 0 &&
+    state.library.draftContext.documentIds.length === 0
+      ? "Global context is active; no internal documents are selected."
+      : draftCoverage.excludedDocuments.length === 0
+        ? "Everything in the indexed library is currently in scope."
+        : `${draftCoverage.includedDocuments.length} document${draftCoverage.includedDocuments.length === 1 ? "" : "s"} in scope, ${draftCoverage.excludedDocuments.length} outside scope.`;
   scopeAppliedSummary.textContent = buildScopeStatusText(state.library.appliedContext, appliedCoverage, "Applied");
-  scopeDraftSummary.textContent = buildScopeStatusText(state.library.draftContext, draftCoverage, "Draft");
-  if (draftChanged) {
-    scopeDraftSummary.textContent += " Apply scope to use these browser selections in chat.";
-  }
+  scopeDraftSummary.textContent = buildScopeStatusText(state.library.draftContext, draftCoverage, "Selected");
 
   scopeIncludedList.innerHTML = "";
   if (
@@ -2938,7 +3155,10 @@ function renderScopePane() {
   ) {
     const empty = document.createElement("p");
     empty.className = "scope-list-empty";
-    empty.textContent = "All indexed documents are included right now.";
+    empty.textContent =
+      state.sourceMode === "broader"
+        ? "No internal documents are selected while Global context is active."
+        : "All indexed documents are included right now.";
     scopeIncludedList.appendChild(empty);
   } else {
     state.library.draftContext.folderIds.forEach((folderId) => {
@@ -2967,7 +3187,7 @@ function renderScopePane() {
   if (draftCoverage.excludedDocuments.length === 0) {
     const empty = document.createElement("p");
     empty.className = "scope-list-empty";
-    empty.textContent = "Nothing is excluded from the current draft scope.";
+    empty.textContent = "Nothing is excluded from the current scope.";
     scopeExcludedList.appendChild(empty);
     return;
   }
@@ -3150,6 +3370,7 @@ function renderConversationSaveButton() {
   saveConversationButton.disabled =
     state.memory.saveInFlight ||
     Boolean(state.memory.renameInFlightId) ||
+    state.memory.pairDeleteInFlightIndex !== null ||
     state.sending ||
     !hasConversationMessages();
   saveConversationButton.textContent = state.memory.saveInFlight
@@ -3277,14 +3498,19 @@ function updateConversationMemoryStatus() {
 }
 
 function applySourceMode(sourceMode) {
-  state.sourceMode = sourceMode;
-
-  modeButtons.forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.sourceMode === sourceMode);
-  });
-
-  modeDescription.textContent = modeCopy[sourceMode].description;
-  composerNote.textContent = modeCopy[sourceMode].composerNote;
+  state.sourceMode = sourceMode === "broader" ? "broader" : "internal";
+  const isBroader = state.sourceMode === "broader";
+  sourceModeButton.classList.toggle("is-broader", isBroader);
+  sourceModeButton.setAttribute("aria-pressed", String(isBroader));
+  sourceModeButton.setAttribute(
+    "aria-label",
+    isBroader ? "Context: Global" : "Context: Internal"
+  );
+  sourceModeButton.title = isBroader
+    ? "Context: Global is active. Click for Context: Internal."
+    : "Context: Internal is active. Click for Context: Global.";
+  sourceModeLabel.textContent = isBroader ? "Context: Global" : "Context: Internal";
+  composerNote.textContent = modeCopy[state.sourceMode].composerNote;
 }
 
 function applyReasoningMode(reasoningMode) {
@@ -3322,6 +3548,7 @@ function renderIntroMessage() {
 }
 
 function renderConversationMessages(messages) {
+  closeMessageActionMenu();
   state.messages = [];
   state.responseIndicatorNode = null;
   messageList.innerHTML = "";
@@ -3344,7 +3571,7 @@ function resetConversation(options = {}) {
     rememberActiveConversationScrollPosition();
   }
   state.conversationId = crypto.randomUUID();
-  applyConversationPreferences(getLastUsedConversationPreferences());
+  applyConversationPreferences(getDefaultConversationPreferences());
   rememberConversationPreferences(state.conversationId);
   renderConversationMessages([]);
   renderSavedConversationList();
@@ -3484,6 +3711,7 @@ async function saveCurrentConversation(options = {}) {
     state.memory.loadError = null;
     rememberConversationPreferences(state.conversationId);
     upsertSavedConversationSummary(buildConversationSummary(payload.conversation));
+    renderConversationMessages(state.messages);
     renderSavedConversationList();
     if (silent) {
       updateConversationMemoryStatus();
@@ -3499,6 +3727,76 @@ async function saveCurrentConversation(options = {}) {
     return null;
   } finally {
     state.memory.saveInFlight = false;
+    renderConversationSaveButton();
+  }
+}
+
+async function deleteSavedConversationPair(assistantMessageIndex) {
+  const conversationId = state.conversationId;
+  if (
+    !conversationId ||
+    !getSavedConversationSummary(conversationId) ||
+    state.memory.pairDeleteInFlightIndex !== null ||
+    !Number.isInteger(assistantMessageIndex)
+  ) {
+    return;
+  }
+
+  const userMessage = state.messages[assistantMessageIndex - 1];
+  const assistantMessage = state.messages[assistantMessageIndex];
+  if (
+    !userMessage ||
+    userMessage.role !== "user" ||
+    !assistantMessage ||
+    assistantMessage.role !== "assistant"
+  ) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "Delete this question and response from the saved conversation?"
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const previousMessages = [...state.messages];
+  state.memory.pairDeleteInFlightIndex = assistantMessageIndex;
+  setComposerState(state.sending);
+  renderConversationMessages(previousMessages);
+  renderSavedConversationList();
+  renderConversationSaveButton();
+  setConversationMemoryStatus("Deleting question and response...");
+
+  try {
+    const response = await fetch(
+      `/api/conversations/${encodeURIComponent(conversationId)}/pairs/${assistantMessageIndex}`,
+      { method: "DELETE" }
+    );
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      const detail = payload && payload.detail ? payload.detail : "Delete failed";
+      throw new Error(detail);
+    }
+    if (!payload || !payload.conversation) {
+      throw new Error("The server returned no updated conversation.");
+    }
+
+    upsertSavedConversationSummary(buildConversationSummary(payload.conversation));
+    renderConversationMessages(payload.conversation.messages || []);
+    renderSavedConversationList();
+    setConversationMemoryStatus(
+      "Question and response deleted from this conversation.",
+      "success"
+    );
+  } catch (error) {
+    renderConversationMessages(previousMessages);
+    setConversationMemoryStatus(`Delete failed: ${error.message}`, "error");
+  } finally {
+    state.memory.pairDeleteInFlightIndex = null;
+    setComposerState(state.sending);
+    renderConversationMessages(state.messages);
+    renderSavedConversationList();
     renderConversationSaveButton();
   }
 }
@@ -3627,10 +3925,10 @@ function renderBrowserStats() {
 
   const draft = state.library.draftContext;
   if (draft.folderIds.length === 0 && draft.documentIds.length === 0) {
-    baseParts.push("draft scope: all docs");
+    baseParts.push(state.sourceMode === "broader" ? "scope: global" : "scope: all docs");
   } else {
     baseParts.push(
-      `draft scope: ${draft.folderIds.length} folder${draft.folderIds.length === 1 ? "" : "s"}, ` +
+      `scope: ${draft.folderIds.length} folder${draft.folderIds.length === 1 ? "" : "s"}, ` +
       `${draft.documentIds.length} doc${draft.documentIds.length === 1 ? "" : "s"}`
     );
   }
@@ -3711,8 +4009,7 @@ function toggleFolderScope(folderId) {
     nextFolders.add(folderId);
   }
   state.library.draftContext.folderIds = normalizeItems(Array.from(nextFolders));
-  renderBrowserStats();
-  renderScopePane();
+  commitDraftContextScope();
   renderFolderTree();
   renderDocumentFileList();
 }
@@ -3725,8 +4022,7 @@ function toggleDocumentScope(documentId) {
     nextDocumentIds.add(documentId);
   }
   state.library.draftContext.documentIds = normalizeItems(Array.from(nextDocumentIds));
-  renderBrowserStats();
-  renderScopePane();
+  commitDraftContextScope();
   renderFolderTree();
   renderDocumentFileList();
 }
@@ -3938,7 +4234,7 @@ function renderFolderTree() {
     openButton.classList.toggle("is-renaming", isInlineRenaming);
     if (!isInlineRenaming) {
       openButton.addEventListener("click", () => {
-        setActiveFolder(node.pathId);
+        setActiveFolder(node.pathId, { renderTree: false });
       });
       bindFolderDropTarget(openButton, node.pathId, row);
     }
@@ -4228,6 +4524,7 @@ function renderLibraryExplorer() {
   renderLibraryBreadcrumbs();
   renderDocumentFileList();
   renderDocumentEditor();
+  renderPreview();
 }
 
 async function openDocumentPreview(documentId, options = {}) {
@@ -4252,6 +4549,7 @@ async function openDocumentPreview(documentId, options = {}) {
     }
 
     state.library.previewDocumentId = documentId;
+    state.library.previewPanelState = "open";
     state.library.editorDismissed = false;
     closeExplorerContextMenu();
     renderBrowserStats();
@@ -4262,6 +4560,24 @@ async function openDocumentPreview(documentId, options = {}) {
     previewEmpty.classList.remove("is-hidden");
     previewCard.classList.add("is-hidden");
   }
+}
+
+function closeDocumentPreview() {
+  state.library.previewDocumentId = null;
+  state.library.previewPanelState = "closed";
+  state.library.editorDismissed = false;
+  renderBrowserStats();
+  renderLibraryExplorer();
+  renderPreview();
+}
+
+function toggleDocumentPreviewMinimized() {
+  if (!getPreviewDocument()) {
+    return;
+  }
+  state.library.previewPanelState =
+    state.library.previewPanelState === "minimized" ? "open" : "minimized";
+  renderPreview();
 }
 
 async function uploadDocument(event) {
@@ -5083,6 +5399,27 @@ async function createFolderFromContext(parentFolderId) {
 
 function renderPreview() {
   const previewDoc = getPreviewDocument();
+  const panelState = state.library.previewPanelState;
+  const isMinimized = panelState === "minimized";
+  const isClosed = panelState === "closed";
+
+  browserBody.classList.toggle("is-preview-minimized", isMinimized);
+  browserBody.classList.toggle("is-preview-closed", isClosed);
+  browserPreviewPanel.classList.toggle("is-minimized", isMinimized);
+  browserPreviewPanel.setAttribute("aria-hidden", isClosed ? "true" : "false");
+  previewContent.classList.toggle("is-hidden", isMinimized || isClosed);
+  previewPanelTitle.textContent = previewDoc
+    ? getDocumentDisplayLabel(previewDoc)
+    : "Document preview";
+  minimizePreviewButton.textContent = isMinimized ? "+" : "−";
+  minimizePreviewButton.setAttribute(
+    "aria-label",
+    isMinimized ? "Restore document preview" : "Minimize document preview"
+  );
+  minimizePreviewButton.title = isMinimized
+    ? "Restore document preview"
+    : "Minimize document preview";
+
   if (!previewDoc) {
     previewEmpty.textContent = "Select a document to preview its indexed content and metadata.";
     previewEmpty.classList.remove("is-hidden");
@@ -5161,6 +5498,16 @@ function applyContextSelection(nextContext) {
   renderScopePane();
 }
 
+function commitDraftContextScope() {
+  const nextContext = cloneContextFilter(state.library.draftContext);
+  const changed = !contextFiltersEqual(nextContext, state.library.appliedContext);
+  applyContextSelection(nextContext);
+  if (changed) {
+    persistActiveConversationPreferences();
+    setLibraryActionStatus("Scope updated and remembered for the current conversation.", "success");
+  }
+}
+
 async function generateDocumentFromContext(event) {
   if (event) {
     event.preventDefault();
@@ -5222,7 +5569,7 @@ async function generateDocumentFromContext(event) {
 }
 
 async function sendMessage(message) {
-  if (!message || state.sending) {
+  if (!message || state.sending || state.memory.pairDeleteInFlightIndex !== null) {
     return;
   }
 
@@ -5462,20 +5809,17 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
   });
 });
 
-modeButtons.forEach((button) => {
-  button.addEventListener("click", () => {
-    const sourceMode = button.dataset.sourceMode;
-    if (!sourceMode || sourceMode === state.sourceMode) {
-      return;
-    }
-    applySourceMode(sourceMode);
-    persistActiveConversationPreferences();
-    const sourceModeLabel = sourceMode === "broader" ? "Broader view" : "Internal docs";
-    setConversationMemoryStatus(
-      `${sourceModeLabel} is now active and remembered for this conversation.`,
-      "success"
-    );
-  });
+sourceModeButton.addEventListener("click", () => {
+  const nextSourceMode = state.sourceMode === "broader" ? "internal" : "broader";
+  applySourceMode(nextSourceMode);
+  renderContextSummary();
+  renderScopePane();
+  persistActiveConversationPreferences();
+  const sourceModeLabel = nextSourceMode === "broader" ? "Context: Global" : "Context: Internal";
+  setConversationMemoryStatus(
+    `${sourceModeLabel} is now active and remembered for this conversation.`,
+    "success"
+  );
 });
 
 reasoningModeButton.addEventListener("click", () => {
@@ -5499,38 +5843,25 @@ closeBrowserButton.addEventListener("click", () => {
   closeDocumentBrowser();
 });
 
+minimizePreviewButton.addEventListener("click", () => {
+  toggleDocumentPreviewMinimized();
+});
+
+closePreviewButton.addEventListener("click", () => {
+  closeDocumentPreview();
+});
+
 document.querySelectorAll("[data-close-browser]").forEach((element) => {
   element.addEventListener("click", () => {
     closeDocumentBrowser();
   });
 });
 
-applyContextButton.addEventListener("click", () => {
-  const nextContext = cloneContextFilter(state.library.draftContext);
-  const changed = !contextFiltersEqual(nextContext, state.library.appliedContext);
-  if (changed) {
-    applyContextSelection(nextContext);
-    persistActiveConversationPreferences();
-    setLibraryActionStatus("Scope applied and remembered for the current conversation.", "success");
-  } else {
-    setLibraryActionStatus("Draft scope already matches the applied scope.");
-  }
-  renderLibraryExplorer();
-});
-
-browserUseAllButton.addEventListener("click", () => {
-  state.library.draftContext = {
-    folderIds: [],
-    documentIds: [],
-  };
-  renderBrowserStats();
-  setLibraryActionStatus("Draft scope reset. All indexed documents are available.", "success");
-  renderLibraryExplorer();
-});
-
 explorerRootButton.addEventListener("click", () => {
   setActiveFolder(null);
 });
+
+folderTreeList.addEventListener("click", handleFolderControlClick, true);
 
 explorerExpandAllButton.addEventListener("click", () => {
   setAllFoldersCollapsed(false);
@@ -5672,21 +6003,12 @@ closeFolderPropertiesButton.addEventListener("click", () => {
   });
 });
 
-clearContextButton.addEventListener("click", () => {
-  if (
-    state.library.appliedContext.folderIds.length === 0 &&
-    state.library.appliedContext.documentIds.length === 0
-  ) {
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.memory.messageActionMenu.open) {
+    event.preventDefault();
+    closeMessageActionMenu();
     return;
   }
-  applyContextSelection({
-    folderIds: [],
-    documentIds: [],
-  });
-  persistActiveConversationPreferences();
-});
-
-document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.memory.contextMenu.open) {
     event.preventDefault();
     closeSavedConversationContextMenu();
@@ -5720,6 +6042,14 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("pointerdown", (event) => {
   if (
+    state.memory.messageActionMenu.open &&
+    state.memory.messageActionMenu.node &&
+    !state.memory.messageActionMenu.node.contains(event.target) &&
+    !state.memory.messageActionMenu.button?.contains(event.target)
+  ) {
+    closeMessageActionMenu();
+  }
+  if (
     state.memory.contextMenu.open &&
     savedConversationContextMenu &&
     !savedConversationContextMenu.contains(event.target) &&
@@ -5738,6 +6068,7 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 window.addEventListener("resize", () => {
+  closeMessageActionMenu();
   if (state.memory.contextMenu.open) {
     closeSavedConversationContextMenu();
   }
