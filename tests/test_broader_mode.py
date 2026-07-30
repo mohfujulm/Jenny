@@ -9,7 +9,7 @@ from app.datastore import RetrievalContext
 from app.document_generator import ContextDocumentGenerator
 from app.models import ChatRequest, Citation, DocumentGenerationRequest, ToolTrace
 from app.prompts import build_context_scope_prompt
-from app.openai_agent import BusinessKnowledgeAgent
+from app.openai_agent import BusinessKnowledgeAgent, strip_generated_upload_citations
 
 
 class BroaderModeTests(unittest.TestCase):
@@ -156,6 +156,20 @@ class BroaderModeTests(unittest.TestCase):
         )
 
         self.assertEqual([citation.document_id for citation in selected], ["DOC-1", "WEB-ABC"])
+
+    def test_generated_upload_citations_are_removed_from_visible_response_text(self) -> None:
+        message = (
+            "The monitor checks every fifteen minutes. [UPL-20260727203603-FA21E5]\n\n"
+            "A stable source remains visible [OPS-001]."
+        )
+
+        cleaned = strip_generated_upload_citations(message)
+
+        self.assertEqual(
+            cleaned,
+            "The monitor checks every fifteen minutes.\n\n"
+            "A stable source remains visible [OPS-001].",
+        )
 
 
 if __name__ == "__main__":

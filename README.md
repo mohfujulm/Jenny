@@ -79,6 +79,37 @@ python -m app.build_semantic_index
 
 For normal use, keep reload off. On Windows, file watching can be dramatically slower, especially when the project contains `.venv`, data files, or large local folders.
 
+### Windows system tray
+
+For normal Windows desktop use, double-click `AskJenny.exe` instead of keeping a
+terminal window open. It is a console-free Windows launcher with the custom
+**J** application icon. The launcher starts the tray application, which starts
+the server in the background and shows its current state in the notification
+area.
+
+Right-click the **Ask Jenny** tray icon to:
+
+- Open the application
+- Start, stop, or restart the server
+- Open the server log
+- Exit the tray application and stop the server
+
+The tray uses the custom teal **J** mark when the server and OpenAI connection
+are healthy and switches to a warning icon when the server detects an OpenAI
+network problem. The same **J** mark appears in the web application and browser
+tab.
+Double-clicking the icon opens the application. Windows may initially place the
+icon in the notification-area overflow menu; drag it onto the taskbar to keep it
+permanently visible.
+
+To rebuild the executable after changing its icon, metadata, or launcher code:
+
+```powershell
+.\build-askjenny.ps1
+```
+
+`tray.cmd` remains available as a script-only fallback.
+
 If you are actively editing code and want auto-reload, use:
 
 ```powershell

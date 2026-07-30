@@ -21,6 +21,40 @@ if ($LASTEXITCODE -ne 0) {
     Write-Warning "PDF OCR is not ready. The app will still start, but scanned PDFs will fail until the configured OCR engine is installed."
 }
 
+Write-Host "Checking OpenAI API network access..."
+$openAiNetworkAvailable = $false
+$openAiNetworkDetail = "Unable to connect to the OpenAI API."
+try {
+    $networkResponse = Invoke-WebRequest `
+        -UseBasicParsing `
+        -Uri "https://api.openai.com/v1/models" `
+        -Method Get `
+        -TimeoutSec 8
+    $openAiNetworkAvailable = $networkResponse.StatusCode -ge 200 -and $networkResponse.StatusCode -lt 500
+    $openAiNetworkDetail = "HTTP $($networkResponse.StatusCode)"
+} catch {
+    $networkStatusCode = 0
+    if ($null -ne $_.Exception.Response) {
+        try {
+            $networkStatusCode = [int]$_.Exception.Response.StatusCode
+        } catch {
+            $networkStatusCode = 0
+        }
+    }
+    if ($networkStatusCode -eq 401) {
+        $openAiNetworkAvailable = $true
+        $openAiNetworkDetail = "HTTP 401 (expected without API authentication)"
+    } else {
+        $openAiNetworkDetail = $_.Exception.Message
+    }
+}
+
+if ($openAiNetworkAvailable) {
+    Write-Host "OpenAI API network access is available. $openAiNetworkDetail"
+} else {
+    Write-Warning "OpenAI API network access is blocked. The app will start in degraded mode, but new document embeddings and AI responses may fail. $openAiNetworkDetail"
+}
+
 $args = @(
     "-m",
     "uvicorn",

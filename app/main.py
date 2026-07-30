@@ -5,6 +5,8 @@ import logging
 import platform
 from pathlib import Path
 import subprocess
+import threading
+import time
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException
@@ -13,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
+from app.connectivity import check_openai_network_access
 from app.conversation_store import SavedConversationStore
 from app.datastore import build_folder_records, build_document_store, load_folder_registry, normalize_folder_path
 from app.document_generator import ContextDocumentGenerator
@@ -71,6 +74,7 @@ from app.reasoning_profiles import get_chat_reasoning_profiles
 
 
 pdf_logger = logging.getLogger("app.pdf_ingestion")
+network_logger = logging.getLogger("app.network")
 settings = get_settings()
 pdf_ocr_status = get_ocr_runtime_status(settings)
 if pdf_ocr_status["enabled"] and not pdf_ocr_status["available"]:
@@ -97,6 +101,29 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE_PATH = STATIC_DIR / "index.html"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+NETWORK_STATUS_CACHE_SECONDS = 30
+_network_status_lock = threading.Lock()
+_network_status_checked_at = 0.0
+_network_status_cache: dict[str, object] | None = None
+
+
+def _get_openai_network_status(*, force: bool = False) -> dict[str, object]:
+    global _network_status_cache, _network_status_checked_at
+
+    now = time.monotonic()
+    with _network_status_lock:
+        if (
+            not force
+            and _network_status_cache is not None
+            and now - _network_status_checked_at < NETWORK_STATUS_CACHE_SECONDS
+        ):
+            return dict(_network_status_cache)
+
+        status = check_openai_network_access()
+        _network_status_cache = status
+        _network_status_checked_at = time.monotonic()
+        return dict(status)
+
 
 def _asset_url(filename: str) -> str:
     asset_path = STATIC_DIR / filename
@@ -110,6 +137,7 @@ def _render_index_html() -> str:
         template
         .replace("{{APP_CSS_URL}}", _asset_url("app.css"))
         .replace("{{APP_JS_URL}}", _asset_url("app.js"))
+        .replace("{{APP_ICON_URL}}", _asset_url("jenny-logo.png"))
     )
 
 
@@ -373,6 +401,14 @@ def _open_tk_folder_picker() -> str | None:
 
 @app.on_event("startup")
 def start_watched_folder_scheduler() -> None:
+    network_status = _get_openai_network_status(force=True)
+    if network_status["reachable"]:
+        network_logger.info("OpenAI API network access is available.")
+    else:
+        network_logger.warning(
+            "OpenAI API network access check failed: %s",
+            network_status["detail"],
+        )
     watch_folder_service.start()
 
 
@@ -382,13 +418,14 @@ def stop_watched_folder_scheduler() -> None:
 
 
 @app.get("/api/health")
-def health() -> dict[str, object]:
+def health(refresh_network: bool = False) -> dict[str, object]:
     return {
         "status": "ok",
         "app_title": settings.app_title,
         "chat_reasoning_models": get_chat_reasoning_profiles(settings),
         "docstore_backend": settings.docstore_backend,
         "openai_configured": bool(settings.openai_api_key),
+        "openai_network": _get_openai_network_status(force=refresh_network),
         "pdf_ocr": get_ocr_runtime_status(settings),
     }
 

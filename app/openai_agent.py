@@ -117,6 +117,17 @@ TOOLS = [
 WEB_SEARCH_TOOL = {"type": "web_search"}
 
 INLINE_CITATION_RE = re.compile(r"\[([A-Za-z0-9][A-Za-z0-9_-]*)\]")
+GENERATED_UPLOAD_CITATION_RE = re.compile(
+    r"[ \t]*\[UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]",
+    flags=re.IGNORECASE,
+)
+
+
+def strip_generated_upload_citations(message: str) -> str:
+    cleaned = GENERATED_UPLOAD_CITATION_RE.sub("", str(message or ""))
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 class SessionManager:
@@ -341,13 +352,17 @@ class BusinessKnowledgeAgent:
 
             tool_calls = [item for item in response.output if getattr(item, "type", None) == "function_call"]
             if not tool_calls:
-                assistant_message = response.output_text.strip()
-                if not assistant_message:
-                    assistant_message = "I could not produce a final answer."
+                raw_assistant_message = response.output_text.strip()
+                if not raw_assistant_message:
+                    raw_assistant_message = "I could not produce a final answer."
                 final_citations = self._select_final_citations(
-                    assistant_message=assistant_message,
+                    assistant_message=raw_assistant_message,
                     citations=citations,
                     traces=traces,
+                )
+                assistant_message = (
+                    strip_generated_upload_citations(raw_assistant_message)
+                    or "I could not produce a final answer."
                 )
                 session.transcript.append(
                     ConversationMessage(
