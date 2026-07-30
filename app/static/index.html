@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Team Knowledge Agent</title>
+    <link rel="icon" type="image/png" href="{{APP_ICON_URL}}">
     <link rel="stylesheet" href="{{APP_CSS_URL}}">
   </head>
   <body>
@@ -14,7 +15,7 @@
             <p class="eyebrow">Database-driven AI assistant</p>
             <h1>Ask Jenny</h1>
           </div>
-          <span class="sidebar-brand-mark" aria-hidden="true">AI</span>
+          <img class="sidebar-brand-mark" src="{{APP_ICON_URL}}" alt="" aria-hidden="true">
         </div>
 
         <nav class="sidebar-nav" aria-label="Primary">
@@ -64,6 +65,20 @@
 
       <main class="chat-stage">
         <div class="chat-mode-controls" aria-label="Chat settings">
+          <button
+            id="statusPill"
+            class="network-status-button is-checking"
+            type="button"
+            aria-label="Checking OpenAI network access"
+            title="Checking OpenAI network access"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M5 12.6a10.8 10.8 0 0 1 14 0"></path>
+              <path d="M8.3 16a5.8 5.8 0 0 1 7.4 0"></path>
+              <path d="M11.2 19.2a1.2 1.2 0 0 1 1.6 0"></path>
+            </svg>
+            <span class="network-status-alert-mark" aria-hidden="true">!</span>
+          </button>
           <button
             id="sourceModeButton"
             class="source-mode-button"
@@ -502,8 +517,9 @@
                   >
                 </label>
 
-                <label class="field" for="documentEditorTagsInput">
+                <div class="field document-editor-tags-field">
                   <span class="field-label">Tags</span>
+                  <div id="documentEditorTagChips" class="tag-chip-list" aria-live="polite"></div>
                   <input
                     id="documentEditorTagsInput"
                     name="documentTags"
@@ -511,7 +527,7 @@
                     maxlength="400"
                     placeholder="billing, onboarding, support"
                   >
-                </label>
+                </div>
 
                 <p id="documentEditorStatus" class="document-editor-status">
                   Change the folder path to move this file elsewhere in the explorer.
@@ -528,6 +544,13 @@
                 <h4 id="previewPanelTitle">Document preview</h4>
               </div>
               <div class="preview-panel-actions">
+                <span
+                  id="previewZoomLabel"
+                  class="preview-zoom-label"
+                  title="Hold Ctrl and scroll over the preview to zoom"
+                >
+                  100%
+                </span>
                 <button
                   id="minimizePreviewButton"
                   class="explorer-icon-button"
@@ -557,6 +580,7 @@
                 <h3 id="previewTitle"></h3>
                 <div id="previewSummary" class="preview-summary"></div>
                 <div id="previewMeta" class="preview-meta-line"></div>
+                <div id="previewSourceMedia" class="preview-source-media is-hidden"></div>
                 <div id="previewText" class="preview-text"></div>
               </article>
             </div>
@@ -624,6 +648,33 @@
           Delete
         </button>
       </div>
+    </div>
+
+    <div id="imageLightbox" class="image-lightbox is-hidden" aria-hidden="true">
+      <button
+        id="imageLightboxBackdrop"
+        class="image-lightbox-backdrop"
+        type="button"
+        aria-label="Close image preview"
+      ></button>
+      <section
+        class="image-lightbox-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Image preview"
+      >
+        <button
+          id="imageLightboxCloseButton"
+          class="image-lightbox-close"
+          type="button"
+          aria-label="Close image preview"
+          title="Close"
+        >
+          &times;
+        </button>
+        <img id="imageLightboxImage" class="image-lightbox-image" alt="">
+        <p id="imageLightboxCaption" class="image-lightbox-caption"></p>
+      </section>
     </div>
 
     <script src="{{APP_JS_URL}}" defer></script>

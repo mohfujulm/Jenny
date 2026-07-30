@@ -20,8 +20,13 @@ const MAX_STORED_CHAT_PREFERENCES = 100;
 const CHAT_SCROLL_STORAGE_KEY = "business-knowledge-chat-scroll-positions-v1";
 const MAX_STORED_CHAT_SCROLL_POSITIONS = 100;
 const FOLDER_DOUBLE_CLICK_WINDOW_MS = 650;
+const PREVIEW_ZOOM_MIN = 0.5;
+const PREVIEW_ZOOM_MAX = 2.5;
+const PREVIEW_ZOOM_STEP = 0.1;
 const conversationPreferenceSyncTimers = new Map();
 let conversationScrollSaveTimer = null;
+let imageLightboxReturnFocus = null;
+let healthRefreshTimer = null;
 let lastFolderControlClick = {
   folderId: null,
   control: null,
@@ -78,6 +83,7 @@ const state = {
     dragPayload: null,
     previewDocumentId: null,
     previewPanelState: "open",
+    previewZoom: 1,
     previewCache: {},
     uploadInFlight: false,
     metadataUpdateInFlight: false,
@@ -144,9 +150,9 @@ const documentGenerationStatus = document.getElementById("documentGenerationStat
 const generateDocumentButton = document.getElementById("generateDocumentButton");
 const documentBrowser = document.getElementById("documentBrowser");
 const closeBrowserButton = document.getElementById("closeBrowserButton");
-const browserBody = document.getElementById("browserBody");
 const browserPreviewPanel = document.getElementById("browserPreviewPanel");
 const previewPanelTitle = document.getElementById("previewPanelTitle");
+const previewZoomLabel = document.getElementById("previewZoomLabel");
 const minimizePreviewButton = document.getElementById("minimizePreviewButton");
 const closePreviewButton = document.getElementById("closePreviewButton");
 const previewContent = document.getElementById("previewContent");
@@ -173,14 +179,18 @@ const previewBadges = document.getElementById("previewBadges");
 const previewTitle = document.getElementById("previewTitle");
 const previewSummary = document.getElementById("previewSummary");
 const previewMeta = document.getElementById("previewMeta");
+const previewSourceMedia = document.getElementById("previewSourceMedia");
 const previewText = document.getElementById("previewText");
 const documentEditorEmpty = document.getElementById("documentEditorEmpty");
 const documentEditorForm = document.getElementById("documentEditorForm");
+const documentEditorCard = documentEditorForm.closest(".document-editor-card");
+documentEditorCard.insertBefore(browserPreviewPanel, documentEditorForm);
 const documentEditorId = document.getElementById("documentEditorId");
 const documentEditorTitleInput = document.getElementById("documentEditorTitleInput");
 const documentEditorCategoryInput = document.getElementById("documentEditorCategoryInput");
 const documentEditorFolderInput = document.getElementById("documentEditorFolderInput");
 const documentEditorTagsInput = document.getElementById("documentEditorTagsInput");
+const documentEditorTagChips = document.getElementById("documentEditorTagChips");
 const documentEditorStatus = document.getElementById("documentEditorStatus");
 const saveDocumentChangesButton = document.getElementById("saveDocumentChangesButton");
 const closeDocumentEditorButton = document.getElementById("closeDocumentEditorButton");
@@ -248,6 +258,11 @@ const explorerContextMenu = document.getElementById("explorerContextMenu");
 const explorerContextNewFolderButton = document.getElementById("explorerContextNewFolderButton");
 const explorerContextRenameButton = document.getElementById("explorerContextRenameButton");
 const explorerContextDeleteButton = document.getElementById("explorerContextDeleteButton");
+const imageLightbox = document.getElementById("imageLightbox");
+const imageLightboxBackdrop = document.getElementById("imageLightboxBackdrop");
+const imageLightboxCloseButton = document.getElementById("imageLightboxCloseButton");
+const imageLightboxImage = document.getElementById("imageLightboxImage");
+const imageLightboxCaption = document.getElementById("imageLightboxCaption");
 
 const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
   ".csv",
@@ -340,6 +355,71 @@ function buildFolderAutoTags(folderId) {
 function stripAutoTagsForFolder(rawTags, folderId) {
   const autoTagKeys = new Set(buildFolderAutoTags(folderId).map((tag) => tag.toLowerCase()));
   return normalizeTagItems(rawTags).filter((tag) => !autoTagKeys.has(tag.toLowerCase()));
+}
+
+function createTagChip(tag, { className = "", removable = false, onRemove, title = "" } = {}) {
+  const chip = document.createElement("span");
+  chip.className = `tag-chip ${className}`.trim();
+  if (title) {
+    chip.title = title;
+  }
+
+  const label = document.createElement("span");
+  label.className = "tag-chip-label";
+  label.textContent = tag;
+  chip.appendChild(label);
+
+  if (removable && onRemove) {
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "tag-chip-remove";
+    removeButton.setAttribute("aria-label", `Remove tag ${tag}`);
+    removeButton.title = `Remove ${tag}`;
+    removeButton.textContent = "×";
+    removeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onRemove(tag);
+    });
+    chip.appendChild(removeButton);
+  }
+
+  return chip;
+}
+
+function renderDocumentEditorTags() {
+  if (!documentEditorTagChips) {
+    return;
+  }
+
+  const tags = normalizeTagItems(documentEditorTagsInput.value || "");
+  documentEditorTagChips.innerHTML = "";
+  if (tags.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "tag-chip-empty";
+    empty.textContent = "No manual tags";
+    documentEditorTagChips.appendChild(empty);
+    return;
+  }
+
+  const canRemove = canMutateLibrary() && Boolean(getPreviewDocument()) && !state.library.metadataUpdateInFlight;
+  tags.forEach((tag) => {
+    documentEditorTagChips.appendChild(createTagChip(tag, {
+      className: "document-editor-tag",
+      removable: canRemove,
+      onRemove: removeDocumentEditorTag,
+    }));
+  });
+}
+
+function removeDocumentEditorTag(tagToRemove) {
+  const nextTags = normalizeTagItems(documentEditorTagsInput.value || "")
+    .filter((tag) => tag.toLowerCase() !== tagToRemove.toLowerCase());
+  documentEditorTagsInput.value = nextTags.join(", ");
+  state.library.editorDirty = true;
+  renderDocumentEditorTags();
+  setDocumentEditorStatus(`Removed “${tagToRemove}”. Save changes to apply it.`);
+  documentEditorTagsInput.focus();
 }
 
 function getUploadFileExtension(filename) {
@@ -1528,6 +1608,14 @@ function canMutateLibrary() {
   return state.library.backend === "json" || state.library.backend === "semantic";
 }
 
+function stripGeneratedUploadCitations(value) {
+  return String(value || "")
+    .replace(/[ \t]*\[UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 async function parseJsonResponse(response) {
   const responseText = await response.text();
   if (!responseText) {
@@ -1543,6 +1631,7 @@ async function parseJsonResponse(response) {
 
 function normalizeConversationMessage(message) {
   const role = message && typeof message.role === "string" ? message.role : "assistant";
+  const rawBody = typeof message.body === "string" ? message.body : "";
   return {
     role,
     label:
@@ -1553,7 +1642,7 @@ function normalizeConversationMessage(message) {
           : role === "system"
             ? "System"
             : "Assistant",
-    body: typeof message.body === "string" ? message.body : "",
+    body: role === "assistant" ? stripGeneratedUploadCitations(rawBody) : rawBody,
     citations: Array.isArray(message && message.citations)
       ? message.citations.map((item) => ({ ...item }))
       : [],
@@ -1793,6 +1882,24 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function isSafeImageUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function isDirectImageUrl(value) {
+  const normalized = String(value || "").trim();
+  if (!isSafeImageUrl(normalized)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    return /\.(?:avif|gif|jpe?g|png|svg|webp)$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function renderInlineMarkdown(text) {
   const placeholders = [];
   const stash = (html) => {
@@ -1806,6 +1913,24 @@ function renderInlineMarkdown(text) {
   rendered = rendered.replace(/`([^`\n]+)`/g, (_, codeText) => {
     return stash(`<code>${codeText}</code>`);
   });
+
+  rendered = rendered.replace(
+    /!\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_, altText, imageUrl) => {
+      const normalizedAlt = altText || "Referenced image";
+      const caption = altText
+        ? `<span class="rendered-markdown-image-caption">${altText}</span>`
+        : "";
+      return stash(
+        `<span class="rendered-markdown-image-wrap">` +
+          `<a class="rendered-markdown-image-link" href="${imageUrl}" ` +
+          `data-image-alt="${normalizedAlt}" target="_blank" rel="noreferrer">` +
+          `<img class="rendered-markdown-image" src="${imageUrl}" alt="${normalizedAlt}" ` +
+          `loading="lazy" decoding="async">` +
+          `</a>${caption}</span>`
+      );
+    }
+  );
 
   rendered = rendered.replace(
     /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
@@ -1952,6 +2077,40 @@ function renderMarkdown(markdown) {
   return blocks.join("");
 }
 
+function openImageLightbox(imageUrl, caption = "", trigger = null) {
+  const normalizedUrl = String(imageUrl || "").trim();
+  if (!isSafeImageUrl(normalizedUrl)) {
+    return;
+  }
+
+  imageLightboxReturnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement;
+  imageLightboxImage.src = normalizedUrl;
+  imageLightboxImage.alt = String(caption || "Expanded image");
+  imageLightboxCaption.textContent = String(caption || "");
+  imageLightboxCaption.classList.toggle("is-hidden", !caption);
+  imageLightbox.classList.remove("is-hidden");
+  imageLightbox.setAttribute("aria-hidden", "false");
+  document.body.classList.add("is-image-lightbox-open");
+  imageLightboxCloseButton.focus();
+}
+
+function closeImageLightbox() {
+  if (imageLightbox.classList.contains("is-hidden")) {
+    return;
+  }
+
+  imageLightbox.classList.add("is-hidden");
+  imageLightbox.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("is-image-lightbox-open");
+  imageLightboxImage.removeAttribute("src");
+  imageLightboxImage.alt = "";
+  imageLightboxCaption.textContent = "";
+  if (imageLightboxReturnFocus instanceof HTMLElement && imageLightboxReturnFocus.isConnected) {
+    imageLightboxReturnFocus.focus();
+  }
+  imageLightboxReturnFocus = null;
+}
+
 function renderMessage(message, options = {}) {
   const normalized = normalizeConversationMessage(message);
   let messageIndex = null;
@@ -2003,6 +2162,35 @@ function renderMessage(message, options = {}) {
     citationList.className = "citation-list";
 
     normalized.citations.forEach((citation) => {
+      const citationImageUrl = isDirectImageUrl(citation.source_url)
+        ? citation.source_url
+        : null;
+      if (citationImageUrl) {
+        const imageLabel = citation.title || "Cited image";
+        const target = document.createElement("button");
+        target.type = "button";
+        target.className = "citation citation-button citation-image-button";
+        target.title = `Expand cited image: ${imageLabel}`;
+
+        const thumbnail = document.createElement("img");
+        thumbnail.className = "citation-image-thumbnail";
+        thumbnail.src = citationImageUrl;
+        thumbnail.alt = imageLabel;
+        thumbnail.loading = "lazy";
+        thumbnail.decoding = "async";
+        target.appendChild(thumbnail);
+
+        const label = document.createElement("span");
+        label.className = "citation-image-label";
+        label.textContent = imageLabel;
+        target.appendChild(label);
+        target.addEventListener("click", () => {
+          openImageLightbox(citationImageUrl, imageLabel, target);
+        });
+        citationList.appendChild(target);
+        return;
+      }
+
       const isWebCitation = citation.category === "web" && /^https?:\/\//i.test(citation.source_url || "");
       if (isWebCitation) {
         const target = document.createElement("a");
@@ -2020,8 +2208,9 @@ function renderMessage(message, options = {}) {
       target.type = "button";
       target.className = "citation citation-button";
       target.dataset.documentId = citation.document_id;
-      target.textContent = getDocumentDisplayLabel(citation);
-      target.title = `Open ${citation.document_id}`;
+      const displayLabel = getDocumentDisplayLabel(citation);
+      target.textContent = displayLabel;
+      target.title = `Open ${displayLabel}`;
       target.addEventListener("click", async () => {
         await openCitationDocument(citation);
       });
@@ -2980,6 +3169,9 @@ function setDocumentEditorState(isUpdating) {
   ].forEach((element) => {
     element.disabled = isUpdating || !canEdit;
   });
+  documentEditorTagChips.querySelectorAll(".tag-chip-remove").forEach((button) => {
+    button.disabled = isUpdating || !canEdit;
+  });
   saveDocumentChangesButton.textContent = isUpdating ? "Saving changes..." : "Save changes";
 }
 
@@ -3247,22 +3439,41 @@ function toggleDeleteSelection(documentId) {
   renderDocumentFileList();
 }
 
-async function loadHealth() {
+async function loadHealth({ force = false } = {}) {
   if (!statusPill) {
     return;
   }
 
+  statusPill.classList.add("is-checking");
   try {
-    const response = await fetch("/api/health");
+    const response = await fetch(`/api/health${force ? "?refresh_network=true" : ""}`);
     const payload = await parseJsonResponse(response);
     if (!response.ok) {
       throw new Error("Health check failed");
     }
-    statusPill.textContent = payload.openai_configured
-      ? `Ready - ${payload.docstore_backend} datastore`
-      : "OpenAI key missing";
+    const networkStatus = payload.openai_network || {};
+    const hasAlert = !payload.openai_configured || networkStatus.reachable !== true;
+    const detail = !payload.openai_configured
+      ? "OpenAI API key is missing."
+      : networkStatus.detail || "OpenAI network status is unavailable.";
+    const label = hasAlert
+      ? `Network alert. ${detail} Click to retry.`
+      : "OpenAI network access is available. Click to refresh.";
+
+    statusPill.classList.toggle("is-alert", hasAlert);
+    statusPill.classList.toggle("is-online", !hasAlert);
+    statusPill.setAttribute("aria-label", label);
+    statusPill.title = label;
   } catch (error) {
-    statusPill.textContent = "Server unavailable";
+    statusPill.classList.add("is-alert");
+    statusPill.classList.remove("is-online");
+    statusPill.setAttribute(
+      "aria-label",
+      "Network status unavailable because the server health check failed. Click to retry."
+    );
+    statusPill.title = "Server health check failed. Click to retry.";
+  } finally {
+    statusPill.classList.remove("is-checking");
   }
 }
 
@@ -4722,6 +4933,7 @@ function hydrateDocumentEditor(previewDoc) {
     state.library.editorDocumentId = null;
     state.library.editorDirty = false;
     documentEditorForm.dataset.documentId = "";
+    renderDocumentEditorTags();
     return;
   }
 
@@ -4730,8 +4942,54 @@ function hydrateDocumentEditor(previewDoc) {
   documentEditorCategoryInput.value = previewDoc.category || "";
   documentEditorFolderInput.value = normalizeFolderPath(previewDoc.folder);
   documentEditorTagsInput.value = stripAutoTagsForFolder(previewDoc.tags || [], previewDoc.folder).join(", ");
+  renderDocumentEditorTags();
   state.library.editorDocumentId = previewDoc.document_id;
   state.library.editorDirty = false;
+}
+
+function renderFolderPropertyTags() {
+  const folderId = state.library.activeFolderId;
+  const watchedFolder = getWatchedFolderForLibraryFolder(folderId);
+  folderPropertiesTags.innerHTML = "";
+
+  if (!folderId) {
+    return;
+  }
+
+  const manualTags = watchedFolder
+    ? stripAutoTagsForFolder(folderPropertiesTagsInput.value || "", folderId)
+    : [];
+  const autoTags = buildFolderAutoTags(folderId);
+  const tags = normalizeTagItems([...manualTags, ...autoTags]);
+  if (tags.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "folder-property-empty";
+    empty.textContent = "No tags";
+    folderPropertiesTags.appendChild(empty);
+    return;
+  }
+
+  const manualTagKeys = new Set(manualTags.map((tag) => tag.toLowerCase()));
+  const autoTagKeys = new Set(autoTags.map((tag) => tag.toLowerCase()));
+  const canRemove = Boolean(watchedFolder) && !state.library.watchFolderInFlight;
+  tags.forEach((tag) => {
+    const isAutoTag = autoTagKeys.has(tag.toLowerCase()) && !manualTagKeys.has(tag.toLowerCase());
+    folderPropertiesTags.appendChild(createTagChip(tag, {
+      className: `folder-property-tag${isAutoTag ? " folder-property-tag-auto" : ""}`,
+      removable: canRemove && !isAutoTag,
+      onRemove: removeFolderPropertyTag,
+      title: isAutoTag ? "Automatically generated from the folder path" : "",
+    }));
+  });
+}
+
+function removeFolderPropertyTag(tagToRemove) {
+  const nextTags = normalizeTagItems(folderPropertiesTagsInput.value || "")
+    .filter((tag) => tag.toLowerCase() !== tagToRemove.toLowerCase());
+  folderPropertiesTagsInput.value = nextTags.join(", ");
+  renderFolderPropertyTags();
+  setLibraryActionStatus(`Removed “${tagToRemove}”. Save settings to apply it.`);
+  folderPropertiesTagsInput.focus();
 }
 
 function renderFolderProperties() {
@@ -4746,11 +5004,6 @@ function renderFolderProperties() {
     folderPathContainsFolder(folderId, documentSummary.folder)
   );
   const categories = normalizeItems(folderDocuments.map((documentSummary) => documentSummary.category));
-  const tags = normalizeTagItems([
-    ...(watchedFolder ? watchedFolder.tags || [] : []),
-    ...buildFolderAutoTags(folderId),
-  ]);
-
   folderPropertiesTitle.textContent = getFolderDisplayName(folderId, getFolderNameSegment(folderId));
   folderPropertiesKind.textContent = watchedFolder
     ? "Synchronized folder. Rename changes its display alias only."
@@ -4792,20 +5045,7 @@ function renderFolderProperties() {
     folderPropertiesEnabledInput.checked = true;
   }
 
-  folderPropertiesTags.innerHTML = "";
-  if (tags.length === 0) {
-    const empty = document.createElement("span");
-    empty.className = "folder-property-empty";
-    empty.textContent = "No tags";
-    folderPropertiesTags.appendChild(empty);
-  } else {
-    tags.forEach((tag) => {
-      const chip = document.createElement("span");
-      chip.className = "folder-property-tag";
-      chip.textContent = tag;
-      folderPropertiesTags.appendChild(chip);
-    });
-  }
+  renderFolderPropertyTags();
 
   renameSelectedFolderButton.textContent = watchedFolder ? "Save settings" : "Rename folder";
   const folderActionInFlight =
@@ -5397,20 +5637,51 @@ async function createFolderFromContext(parentFolderId) {
   }
 }
 
+function renderPreviewSourceMedia(previewDoc) {
+  previewSourceMedia.innerHTML = "";
+  const imageUrl = previewDoc && isDirectImageUrl(previewDoc.source_url)
+    ? previewDoc.source_url
+    : null;
+  previewSourceMedia.classList.toggle("is-hidden", !imageUrl);
+  if (!imageUrl) {
+    return;
+  }
+
+  const imageLabel = previewDoc.title || "Document source image";
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "preview-source-image-button";
+  trigger.title = `Expand ${imageLabel}`;
+
+  const image = document.createElement("img");
+  image.className = "preview-source-image";
+  image.src = imageUrl;
+  image.alt = imageLabel;
+  image.loading = "lazy";
+  image.decoding = "async";
+  trigger.appendChild(image);
+  trigger.addEventListener("click", () => {
+    openImageLightbox(imageUrl, imageLabel, trigger);
+  });
+  previewSourceMedia.appendChild(trigger);
+}
+
 function renderPreview() {
   const previewDoc = getPreviewDocument();
   const panelState = state.library.previewPanelState;
   const isMinimized = panelState === "minimized";
   const isClosed = panelState === "closed";
 
-  browserBody.classList.toggle("is-preview-minimized", isMinimized);
-  browserBody.classList.toggle("is-preview-closed", isClosed);
+  browserPreviewPanel.classList.toggle("is-hidden", !previewDoc || isClosed);
   browserPreviewPanel.classList.toggle("is-minimized", isMinimized);
   browserPreviewPanel.setAttribute("aria-hidden", isClosed ? "true" : "false");
   previewContent.classList.toggle("is-hidden", isMinimized || isClosed);
   previewPanelTitle.textContent = previewDoc
     ? getDocumentDisplayLabel(previewDoc)
     : "Document preview";
+  previewCard.style.zoom = String(state.library.previewZoom);
+  previewZoomLabel.textContent = `${Math.round(state.library.previewZoom * 100)}%`;
+  renderPreviewSourceMedia(previewDoc);
   minimizePreviewButton.textContent = isMinimized ? "+" : "−";
   minimizePreviewButton.setAttribute(
     "aria-label",
@@ -5851,6 +6122,31 @@ closePreviewButton.addEventListener("click", () => {
   closeDocumentPreview();
 });
 
+browserPreviewPanel.addEventListener(
+  "wheel",
+  (event) => {
+    if ((!event.ctrlKey && !event.metaKey) || state.library.previewPanelState !== "open") {
+      return;
+    }
+
+    const previewDoc = getPreviewDocument();
+    if (!previewDoc || event.deltaY === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    const zoomDelta = event.deltaY < 0 ? PREVIEW_ZOOM_STEP : -PREVIEW_ZOOM_STEP;
+    const nextZoom = Math.min(
+      PREVIEW_ZOOM_MAX,
+      Math.max(PREVIEW_ZOOM_MIN, state.library.previewZoom + zoomDelta)
+    );
+    state.library.previewZoom = Math.round(nextZoom * 10) / 10;
+    previewCard.style.zoom = String(state.library.previewZoom);
+    previewZoomLabel.textContent = `${Math.round(state.library.previewZoom * 100)}%`;
+  },
+  { passive: false }
+);
+
 document.querySelectorAll("[data-close-browser]").forEach((element) => {
   element.addEventListener("click", () => {
     closeDocumentBrowser();
@@ -6003,7 +6299,44 @@ closeFolderPropertiesButton.addEventListener("click", () => {
   });
 });
 
+documentEditorTagsInput.addEventListener("input", () => {
+  renderDocumentEditorTags();
+});
+
+folderPropertiesTagsInput.addEventListener("input", () => {
+  renderFolderPropertyTags();
+});
+
+imageLightboxBackdrop.addEventListener("click", () => {
+  closeImageLightbox();
+});
+
+imageLightboxCloseButton.addEventListener("click", () => {
+  closeImageLightbox();
+});
+
+document.addEventListener("click", (event) => {
+  const imageLink = event.target instanceof Element
+    ? event.target.closest(".rendered-markdown-image-link")
+    : null;
+  if (!imageLink) {
+    return;
+  }
+
+  event.preventDefault();
+  openImageLightbox(
+    imageLink.getAttribute("href"),
+    imageLink.dataset.imageAlt || "Referenced image",
+    imageLink
+  );
+});
+
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !imageLightbox.classList.contains("is-hidden")) {
+    event.preventDefault();
+    closeImageLightbox();
+    return;
+  }
   if (event.key === "Escape" && state.memory.messageActionMenu.open) {
     event.preventDefault();
     closeMessageActionMenu();
@@ -6079,6 +6412,9 @@ window.addEventListener("resize", () => {
 
 window.addEventListener("pagehide", () => {
   rememberActiveConversationScrollPosition();
+  if (healthRefreshTimer !== null) {
+    window.clearInterval(healthRefreshTimer);
+  }
 });
 
 documentBrowser.addEventListener("scroll", () => {
@@ -6102,5 +6438,11 @@ renderSavedConversationList();
 renderConversationSaveButton();
 resetConversation({ rememberCurrentScroll: false });
 void loadHealth();
+statusPill?.addEventListener("click", () => {
+  void loadHealth({ force: true });
+});
+healthRefreshTimer = window.setInterval(() => {
+  void loadHealth();
+}, 30000);
 void loadSavedConversations({ openMostRecent: true });
 void loadDocumentLibrary();
