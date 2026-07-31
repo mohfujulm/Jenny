@@ -18,23 +18,51 @@ def _copy_conversation(conversation: SavedConversationDetail) -> SavedConversati
 
 
 class SavedConversationStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, default_owner_user_id: str) -> None:
         self._path = path
+        self._default_owner_user_id = default_owner_user_id
         self._lock = threading.Lock()
+        self._migrate_unowned_conversations()
 
-    def list_conversations(self) -> list[SavedConversationSummary]:
+    def list_conversations(self, owner_user_id: str) -> list[SavedConversationSummary]:
         with self._lock:
             conversations = self._load_conversations_locked()
-        return [self._to_summary(item) for item in conversations]
+        return [
+            self._to_summary(item)
+            for item in conversations
+            if item.owner_user_id == owner_user_id
+        ]
 
-    def get_conversation(self, conversation_id: str) -> SavedConversationDetail | None:
+    def get_conversation(
+        self,
+        conversation_id: str,
+        owner_user_id: str,
+    ) -> SavedConversationDetail | None:
         with self._lock:
             conversations = self._load_conversations_locked()
             conversation = next(
-                (item for item in conversations if item.conversation_id == conversation_id),
+                (
+                    item
+                    for item in conversations
+                    if item.conversation_id == conversation_id
+                    and item.owner_user_id == owner_user_id
+                ),
                 None,
             )
         return None if conversation is None else _copy_conversation(conversation)
+
+    def get_conversation_owner(self, conversation_id: str) -> str | None:
+        with self._lock:
+            conversations = self._load_conversations_locked()
+            conversation = next(
+                (
+                    item
+                    for item in conversations
+                    if item.conversation_id == conversation_id
+                ),
+                None,
+            )
+        return None if conversation is None else conversation.owner_user_id
 
     def save_session(self, session: SessionState, title: str | None = None) -> SavedConversationDetail:
         if not session.transcript:
@@ -46,6 +74,8 @@ class SavedConversationStore:
                 (item for item in conversations if item.conversation_id == session.conversation_id),
                 None,
             )
+            if existing is not None and existing.owner_user_id != session.owner_user_id:
+                raise PermissionError("Conversation belongs to another user.")
             normalized_title = self._normalize_explicit_title(title)
             if normalized_title is not None:
                 resolved_title = normalized_title
@@ -58,6 +88,7 @@ class SavedConversationStore:
                 title_is_custom = False
             conversation = SavedConversationDetail(
                 conversation_id=session.conversation_id,
+                owner_user_id=session.owner_user_id,
                 title=resolved_title,
                 title_is_custom=title_is_custom,
                 summary=self._resolve_summary(session.transcript),
@@ -77,11 +108,14 @@ class SavedConversationStore:
             self._write_conversations_locked(next_conversations)
         return _copy_conversation(conversation)
 
-    def delete_conversation(self, conversation_id: str) -> bool:
+    def delete_conversation(self, conversation_id: str, owner_user_id: str) -> bool:
         with self._lock:
             conversations = self._load_conversations_locked()
             next_conversations = [
-                item for item in conversations if item.conversation_id != conversation_id
+                item
+                for item in conversations
+                if item.conversation_id != conversation_id
+                or item.owner_user_id != owner_user_id
             ]
             deleted = len(next_conversations) != len(conversations)
             if deleted:
@@ -92,11 +126,17 @@ class SavedConversationStore:
         self,
         conversation_id: str,
         assistant_message_index: int,
+        owner_user_id: str,
     ) -> SavedConversationDetail | None:
         with self._lock:
             conversations = self._load_conversations_locked()
             conversation = next(
-                (item for item in conversations if item.conversation_id == conversation_id),
+                (
+                    item
+                    for item in conversations
+                    if item.conversation_id == conversation_id
+                    and item.owner_user_id == owner_user_id
+                ),
                 None,
             )
             if conversation is None:
@@ -153,6 +193,24 @@ class SavedConversationStore:
             json.dumps(payload, ensure_ascii=True, indent=2),
             encoding="utf-8",
         )
+
+    def _migrate_unowned_conversations(self) -> None:
+        if not self._path.exists():
+            return
+        with self._lock:
+            payload = json.loads(self._path.read_text(encoding="utf-8"))
+            items = payload.get("conversations", []) if isinstance(payload, dict) else []
+            changed = False
+            for item in items:
+                if not isinstance(item, dict) or item.get("owner_user_id"):
+                    continue
+                item["owner_user_id"] = self._default_owner_user_id
+                changed = True
+            if changed:
+                self._path.write_text(
+                    json.dumps({"conversations": items}, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
 
     def _normalize_explicit_title(self, explicit_title: str | None) -> str | None:
         normalized_title = " ".join((explicit_title or "").split())
@@ -305,6 +363,7 @@ class SavedConversationStore:
     def _to_summary(self, conversation: SavedConversationDetail) -> SavedConversationSummary:
         return SavedConversationSummary(
             conversation_id=conversation.conversation_id,
+            owner_user_id=conversation.owner_user_id,
             title=conversation.title,
             title_is_custom=conversation.title_is_custom,
             summary=conversation.summary,

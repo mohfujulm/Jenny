@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import platform
 from pathlib import Path
+import queue
 import subprocess
 import threading
 import time
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from openai import OpenAIError
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
@@ -22,6 +24,10 @@ from app.document_generator import ContextDocumentGenerator
 from app.ingestion import DocumentIngestionService, SimilarDocumentConflictError
 from app.watch_folders import WatchedFolderService
 from app.models import (
+    AuthChangePasswordRequest,
+    AuthLoginRequest,
+    AuthSessionResponse,
+    AuthSignupRequest,
     ChatRequest,
     ChatResponse,
     ConversationDeleteResponse,
@@ -68,9 +74,12 @@ from app.models import (
     WatchedFolderUpdateRequest,
     WatchedFolderUpdateResponse,
 )
-from app.openai_agent import BusinessKnowledgeAgent, SessionManager
+from app.openai_agent import BusinessKnowledgeAgent, ChatCancelledError, SessionManager
 from app.ocr import get_ocr_runtime_status
+from app.pdf_vision import get_pdf_vision_runtime_status
 from app.reasoning_profiles import get_chat_reasoning_profiles
+from app.ui_sessions import BrowserSessionRegistry
+from app.user_store import DuplicateUsernameError, InvalidCredentialsError, UserStore
 
 
 pdf_logger = logging.getLogger("app.pdf_ingestion")
@@ -82,7 +91,16 @@ if pdf_ocr_status["enabled"] and not pdf_ocr_status["available"]:
 document_store = build_document_store(settings)
 ingestion_service = DocumentIngestionService(settings)
 watch_folder_service = WatchedFolderService(settings, ingestion_service)
-conversation_store = SavedConversationStore(settings.saved_conversations_path)
+user_store = UserStore(settings.application_database_path)
+default_admin_user = user_store.ensure_default_admin(
+    username=settings.default_admin_username,
+    display_name=settings.default_admin_display_name,
+    password=settings.default_admin_password,
+)
+conversation_store = SavedConversationStore(
+    settings.saved_conversations_path,
+    default_owner_user_id=default_admin_user.user_id,
+)
 session_manager = SessionManager(
     settings.session_ttl_minutes,
     saved_conversations=conversation_store,
@@ -94,8 +112,10 @@ agent = BusinessKnowledgeAgent(
     session_manager,
     document_generator=document_generator,
 )
+ui_session_registry = BrowserSessionRegistry()
 
 app = FastAPI(title=settings.app_title)
+AUTH_COOKIE_NAME = "askjenny_session"
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE_PATH = STATIC_DIR / "index.html"
@@ -427,7 +447,163 @@ def health(refresh_network: bool = False) -> dict[str, object]:
         "openai_configured": bool(settings.openai_api_key),
         "openai_network": _get_openai_network_status(force=refresh_network),
         "pdf_ocr": get_ocr_runtime_status(settings),
+        "pdf_image_understanding": get_pdf_vision_runtime_status(settings),
     }
+
+
+@app.get("/api/ui-sessions/active")
+def active_ui_sessions() -> dict[str, object]:
+    active_count = ui_session_registry.active_count()
+    return {
+        "active": active_count > 0,
+        "count": active_count,
+    }
+
+
+@app.post("/api/ui-sessions/{session_id}")
+def heartbeat_ui_session(session_id: str) -> dict[str, object]:
+    try:
+        active_count = ui_session_registry.heartbeat(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "active": True,
+        "count": active_count,
+    }
+
+
+@app.delete("/api/ui-sessions/{session_id}")
+def close_ui_session(session_id: str) -> dict[str, object]:
+    try:
+        active_count = ui_session_registry.remove(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "active": active_count > 0,
+        "count": active_count,
+    }
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    max_age = max(1, settings.auth_session_ttl_hours) * 60 * 60
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+
+
+def _require_authenticated_user(request: Request):
+    user = user_store.get_user_for_session(request.cookies.get(AUTH_COOKIE_NAME))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to access conversations.")
+    if user.must_change_password:
+        raise HTTPException(
+            status_code=403,
+            detail="Change the temporary password before accessing conversations.",
+        )
+    return user
+
+
+@app.get("/api/auth/session", response_model=AuthSessionResponse)
+def get_auth_session(request: Request) -> AuthSessionResponse:
+    user = user_store.get_user_for_session(request.cookies.get(AUTH_COOKIE_NAME))
+    if user is None:
+        return AuthSessionResponse(
+            authenticated=False,
+            user=None,
+            message="Not signed in.",
+        )
+    return AuthSessionResponse(
+        authenticated=True,
+        user=user,
+        message=f"Signed in as {user.display_name}.",
+    )
+
+
+@app.post("/api/auth/login", response_model=AuthSessionResponse)
+def login(request: AuthLoginRequest, response: Response) -> AuthSessionResponse:
+    try:
+        user = user_store.authenticate(request.username, request.password)
+    except (InvalidCredentialsError, ValueError) as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Email or password is incorrect.",
+        ) from exc
+    token = user_store.create_session(user.user_id, settings.auth_session_ttl_hours)
+    _set_auth_cookie(response, token)
+    return AuthSessionResponse(
+        authenticated=True,
+        user=user,
+        message=f"Welcome back, {user.display_name}.",
+    )
+
+
+@app.post("/api/auth/signup", response_model=AuthSessionResponse, status_code=201)
+def signup(request: AuthSignupRequest, response: Response) -> AuthSessionResponse:
+    try:
+        user = user_store.create_user(
+            username=request.username,
+            display_name=request.display_name,
+            password=request.password,
+            role="member",
+        )
+    except DuplicateUsernameError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    token = user_store.create_session(user.user_id, settings.auth_session_ttl_hours)
+    _set_auth_cookie(response, token)
+    return AuthSessionResponse(
+        authenticated=True,
+        user=user,
+        message=f"Welcome, {user.display_name}. Your member account is ready.",
+    )
+
+
+@app.post("/api/auth/change-password", response_model=AuthSessionResponse)
+def change_password(
+    request: AuthChangePasswordRequest,
+    http_request: Request,
+) -> AuthSessionResponse:
+    user = user_store.get_user_for_session(
+        http_request.cookies.get(AUTH_COOKIE_NAME)
+    )
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to change your password.")
+    try:
+        updated_user = user_store.change_password(
+            user_id=user.user_id,
+            current_password=request.current_password,
+            new_password=request.new_password,
+        )
+    except InvalidCredentialsError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Current password is incorrect.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return AuthSessionResponse(
+        authenticated=True,
+        user=updated_user,
+        message="Password changed.",
+    )
+
+
+@app.post("/api/auth/logout", response_model=AuthSessionResponse)
+def logout(request: Request, response: Response) -> AuthSessionResponse:
+    user_store.delete_session(request.cookies.get(AUTH_COOKIE_NAME))
+    response.delete_cookie(key=AUTH_COOKIE_NAME, path="/")
+    return AuthSessionResponse(
+        authenticated=False,
+        user=None,
+        message="Signed out.",
+    )
 
 
 @app.post("/api/local-folders/browse", response_model=LocalFolderBrowseResponse)
@@ -599,15 +775,21 @@ def delete_watched_folder(watch_id: str) -> WatchedFolderDeleteResponse:
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> ChatResponse:
+def chat(payload: ChatRequest, http_request: Request) -> ChatResponse:
+    user = _require_authenticated_user(http_request)
     try:
         return agent.chat(
-            request.conversation_id,
-            request.message.strip(),
-            request.source_mode,
-            request.context_filter,
-            request.reasoning_mode,
+            payload.conversation_id,
+            user.user_id,
+            payload.message.strip(),
+            payload.images,
+            payload.source_mode,
+            payload.context_filter,
+            payload.reasoning_mode,
+            request_id=payload.request_id,
         )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Saved conversation not found.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -621,30 +803,55 @@ def chat(request: ChatRequest) -> ChatResponse:
         ) from exc
 
 
+@app.post("/api/chat/{request_id}/cancel")
+def cancel_chat(request_id: str, http_request: Request) -> dict[str, object]:
+    user = _require_authenticated_user(http_request)
+    cancelled = agent.cancel_request(request_id, user.user_id)
+    return {
+        "request_id": request_id,
+        "cancelled": cancelled,
+        "message": (
+            "Cancellation requested."
+            if cancelled
+            else "The response was already complete or is no longer active."
+        ),
+    }
+
+
 @app.get("/api/conversations", response_model=ConversationListResponse)
-def list_conversations() -> ConversationListResponse:
+def list_conversations(request: Request) -> ConversationListResponse:
+    user = _require_authenticated_user(request)
     return ConversationListResponse(
-        conversations=session_manager.list_saved_conversations(),
+        conversations=session_manager.list_saved_conversations(user.user_id),
     )
 
 
 @app.get("/api/conversations/{conversation_id}", response_model=SavedConversationDetail)
-def get_conversation(conversation_id: str) -> SavedConversationDetail:
-    conversation = session_manager.load_saved_conversation(conversation_id)
+def get_conversation(conversation_id: str, request: Request) -> SavedConversationDetail:
+    user = _require_authenticated_user(request)
+    conversation = session_manager.load_saved_conversation(
+        conversation_id,
+        user.user_id,
+    )
     if conversation is None:
         raise HTTPException(status_code=404, detail="Saved conversation not found.")
     return conversation
 
 
 @app.post("/api/conversations/save", response_model=ConversationSaveResponse)
-def save_conversation(request: ConversationSaveRequest) -> ConversationSaveResponse:
+def save_conversation(
+    payload: ConversationSaveRequest,
+    http_request: Request,
+) -> ConversationSaveResponse:
+    user = _require_authenticated_user(http_request)
     try:
         conversation = session_manager.save_conversation(
-            request.conversation_id,
-            title=request.title,
-            source_mode=request.source_mode,
-            reasoning_mode=request.reasoning_mode,
-            context_filter=request.context_filter,
+            payload.conversation_id,
+            user.user_id,
+            title=payload.title,
+            source_mode=payload.source_mode,
+            reasoning_mode=payload.reasoning_mode,
+            context_filter=payload.context_filter,
         )
         return ConversationSaveResponse(
             conversation=conversation,
@@ -652,6 +859,10 @@ def save_conversation(request: ConversationSaveRequest) -> ConversationSaveRespo
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ChatCancelledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Saved conversation not found.") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -663,25 +874,30 @@ def save_conversation(request: ConversationSaveRequest) -> ConversationSaveRespo
 
 @app.post("/api/conversations/settings", response_model=ConversationSettingsResponse)
 def update_conversation_settings(
-    request: ConversationSettingsRequest,
+    payload: ConversationSettingsRequest,
+    http_request: Request,
 ) -> ConversationSettingsResponse:
+    user = _require_authenticated_user(http_request)
     try:
         conversation = session_manager.update_conversation_settings(
-            request.conversation_id,
-            request.source_mode,
-            request.context_filter,
-            request.reasoning_mode,
+            payload.conversation_id,
+            user.user_id,
+            payload.source_mode,
+            payload.context_filter,
+            payload.reasoning_mode,
         )
         return ConversationSettingsResponse(
-            conversation_id=request.conversation_id,
-            source_mode=request.source_mode,
-            reasoning_mode=request.reasoning_mode,
-            context_filter=request.context_filter,
+            conversation_id=payload.conversation_id,
+            source_mode=payload.source_mode,
+            reasoning_mode=payload.reasoning_mode,
+            context_filter=payload.context_filter,
             saved=conversation is not None,
             conversation=conversation,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="Saved conversation not found.") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -698,11 +914,14 @@ def update_conversation_settings(
 def delete_conversation_pair(
     conversation_id: str,
     assistant_message_index: int,
+    request: Request,
 ) -> ConversationPairDeleteResponse:
+    user = _require_authenticated_user(request)
     try:
         conversation = session_manager.delete_saved_conversation_pair(
             conversation_id,
             assistant_message_index,
+            user.user_id,
         )
         if conversation is None:
             raise HTTPException(status_code=404, detail="Saved conversation not found.")
@@ -726,9 +945,13 @@ def delete_conversation_pair(
 
 
 @app.delete("/api/conversations/{conversation_id}", response_model=ConversationDeleteResponse)
-def delete_conversation(conversation_id: str) -> ConversationDeleteResponse:
+def delete_conversation(conversation_id: str, request: Request) -> ConversationDeleteResponse:
+    user = _require_authenticated_user(request)
     try:
-        deleted = session_manager.delete_saved_conversation(conversation_id)
+        deleted = session_manager.delete_saved_conversation(
+            conversation_id,
+            user.user_id,
+        )
         if not deleted:
             raise HTTPException(status_code=404, detail="Saved conversation not found.")
         return ConversationDeleteResponse(
@@ -1007,6 +1230,77 @@ def delete_documents(request: DocumentDeleteRequest) -> DocumentDeleteResponse:
             status_code=500,
             detail="Unexpected server error while deleting documents.",
         ) from exc
+
+
+@app.post("/api/documents/delete/stream")
+def delete_documents_stream(request: DocumentDeleteRequest) -> StreamingResponse:
+    events: queue.Queue[dict[str, object]] = queue.Queue()
+
+    def report(phase: str, percent: int, detail: str) -> None:
+        events.put(
+            {
+                "type": "progress",
+                "phase": phase,
+                "percent": max(0, min(100, int(percent))),
+                "detail": detail,
+            }
+        )
+
+    def run_delete() -> None:
+        try:
+            started_at = time.monotonic()
+            outcome = ingestion_service.delete_documents(
+                document_ids=request.document_ids,
+                progress_callback=report,
+            )
+            _invalidate_document_store_cache()
+            result = DocumentDeleteResponse(
+                deleted_document_ids=outcome.deleted_document_ids,
+                total_deleted=len(outcome.deleted_document_ids),
+                semantic_index_rebuilt=outcome.semantic_index_rebuilt,
+                message=outcome.message,
+            )
+            events.put(
+                {
+                    "type": "result",
+                    "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                    "payload": result.model_dump(mode="json"),
+                }
+            )
+        except (ValueError, RuntimeError) as exc:
+            events.put({"type": "error", "detail": str(exc)})
+        except Exception:
+            logging.getLogger("uvicorn.error").exception(
+                "Unexpected server error while deleting documents."
+            )
+            events.put(
+                {
+                    "type": "error",
+                    "detail": "Unexpected server error while deleting documents.",
+                }
+            )
+
+    threading.Thread(
+        target=run_delete,
+        name="askjenny-document-delete",
+        daemon=True,
+    ).start()
+
+    def stream_events():
+        while True:
+            event = events.get()
+            yield json.dumps(event, ensure_ascii=True) + "\n"
+            if event.get("type") in {"result", "error"}:
+                break
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/documents/tags", response_model=DocumentTagUpdateResponse)

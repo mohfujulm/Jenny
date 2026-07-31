@@ -60,6 +60,11 @@ class Settings:
     openai_maximum_reasoning_effort: str
     openai_text_verbosity: str
     session_ttl_minutes: int
+    application_database_path: Path
+    auth_session_ttl_hours: int
+    default_admin_username: str
+    default_admin_display_name: str
+    default_admin_password: str
     saved_conversations_path: Path
     docstore_backend: str
     docstore_json_path: Path
@@ -77,6 +82,12 @@ class Settings:
     semantic_chunk_size_words: int
     semantic_chunk_overlap_words: int
     semantic_embedding_batch_size: int
+    chat_request_timeout_seconds: int
+    chat_max_tool_rounds: int
+    openai_request_timeout_seconds: int
+    source_download_timeout_seconds: int
+    source_download_max_attempts: int
+    source_download_max_bytes: int
     pdf_ocr_enabled: bool = True
     pdf_ocr_engine: str = "tesseract"
     pdf_ocr_language: str = "eng"
@@ -85,6 +96,15 @@ class Settings:
     pdf_ocr_timeout_seconds: int = 60
     pdf_ocr_tesseract_cmd: str = "tesseract"
     pdf_max_pages: int = 500
+    pdf_image_ocr_enabled: bool = True
+    pdf_image_ocr_max_pages: int = 100
+    pdf_vision_enabled: bool = True
+    pdf_vision_model: str = "gpt-5.6-luna"
+    pdf_vision_max_pages: int = 12
+    pdf_vision_batch_size: int = 3
+    pdf_vision_dpi: int = 144
+    pdf_vision_max_dimension: int = 1800
+    pdf_vision_timeout_seconds: int = 60
 
 
 @lru_cache(maxsize=1)
@@ -105,6 +125,23 @@ def get_settings() -> Settings:
         ),
         openai_text_verbosity=os.getenv("OPENAI_TEXT_VERBOSITY", "medium"),
         session_ttl_minutes=_to_int(os.getenv("SESSION_TTL_MINUTES"), 60),
+        application_database_path=ROOT_DIR / os.getenv(
+            "APPLICATION_DATABASE_PATH",
+            "app/data/application.sqlite",
+        ),
+        auth_session_ttl_hours=_to_int(os.getenv("AUTH_SESSION_TTL_HOURS"), 168),
+        default_admin_username=os.getenv(
+            "DEFAULT_ADMIN_USERNAME",
+            "admin",
+        ),
+        default_admin_display_name=os.getenv(
+            "DEFAULT_ADMIN_DISPLAY_NAME",
+            "Administrator",
+        ),
+        default_admin_password=os.getenv(
+            "DEFAULT_ADMIN_PASSWORD",
+            "Administrator!1",
+        ),
         saved_conversations_path=ROOT_DIR / os.getenv("SAVED_CONVERSATIONS_PATH", "app/data/saved_conversations.json"),
         docstore_backend=os.getenv("DOCSTORE_BACKEND", "json").strip().lower(),
         docstore_json_path=ROOT_DIR / os.getenv("DOCSTORE_JSON_PATH", "app/data/sample_documents.json"),
@@ -122,6 +159,18 @@ def get_settings() -> Settings:
         pdf_ocr_timeout_seconds=_to_int(os.getenv("PDF_OCR_TIMEOUT_SECONDS"), 60),
         pdf_ocr_tesseract_cmd=os.getenv("PDF_OCR_TESSERACT_CMD", "tesseract").strip() or "tesseract",
         pdf_max_pages=_to_int(os.getenv("PDF_MAX_PAGES"), 500),
+        pdf_image_ocr_enabled=_to_bool(os.getenv("PDF_IMAGE_OCR_ENABLED"), True),
+        pdf_image_ocr_max_pages=_to_int(os.getenv("PDF_IMAGE_OCR_MAX_PAGES"), 100),
+        pdf_vision_enabled=_to_bool(os.getenv("PDF_VISION_ENABLED"), True),
+        pdf_vision_model=os.getenv(
+            "PDF_VISION_MODEL",
+            os.getenv("OPENAI_STANDARD_MODEL", "gpt-5.6-luna"),
+        ).strip() or "gpt-5.6-luna",
+        pdf_vision_max_pages=_to_int(os.getenv("PDF_VISION_MAX_PAGES"), 12),
+        pdf_vision_batch_size=_to_int(os.getenv("PDF_VISION_BATCH_SIZE"), 3),
+        pdf_vision_dpi=_to_int(os.getenv("PDF_VISION_DPI"), 144),
+        pdf_vision_max_dimension=_to_int(os.getenv("PDF_VISION_MAX_DIMENSION"), 1800),
+        pdf_vision_timeout_seconds=_to_int(os.getenv("PDF_VISION_TIMEOUT_SECONDS"), 60),
         docstore_base_url=os.getenv("DOCSTORE_BASE_URL", "http://localhost:8081").rstrip("/"),
         docstore_api_key=os.getenv("DOCSTORE_API_KEY"),
         docstore_timeout_seconds=_to_int(os.getenv("DOCSTORE_TIMEOUT_SECONDS"), 15),
@@ -138,4 +187,25 @@ def get_settings() -> Settings:
         semantic_chunk_size_words=_to_int(os.getenv("SEMANTIC_CHUNK_SIZE_WORDS"), 220),
         semantic_chunk_overlap_words=_to_int(os.getenv("SEMANTIC_CHUNK_OVERLAP_WORDS"), 40),
         semantic_embedding_batch_size=_to_int(os.getenv("SEMANTIC_EMBEDDING_BATCH_SIZE"), 32),
+        chat_request_timeout_seconds=_to_int(
+            os.getenv("CHAT_REQUEST_TIMEOUT_SECONDS"),
+            120,
+        ),
+        chat_max_tool_rounds=_to_int(os.getenv("CHAT_MAX_TOOL_ROUNDS"), 5),
+        openai_request_timeout_seconds=_to_int(
+            os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS"),
+            60,
+        ),
+        source_download_timeout_seconds=_to_int(
+            os.getenv("SOURCE_DOWNLOAD_TIMEOUT_SECONDS"),
+            20,
+        ),
+        source_download_max_attempts=_to_int(
+            os.getenv("SOURCE_DOWNLOAD_MAX_ATTEMPTS"),
+            1,
+        ),
+        source_download_max_bytes=_to_int(
+            os.getenv("SOURCE_DOWNLOAD_MAX_BYTES"),
+            20 * 1024 * 1024,
+        ),
     )

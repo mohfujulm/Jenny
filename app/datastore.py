@@ -10,7 +10,7 @@ import re
 import shutil
 import sqlite3
 from contextlib import closing
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import httpx
@@ -1514,6 +1514,86 @@ def sync_semantic_index(
         "reused_documents": reused_document_count,
         "removed_documents": len(removed_document_ids),
         "changed": True,
+    }
+
+
+def delete_documents_from_semantic_index(
+    *,
+    index_path: Path,
+    document_ids: list[str],
+    progress_callback: Callable[[str, int, str], None] | None = None,
+) -> dict[str, Any]:
+    normalized_ids = list(dict.fromkeys(str(item).strip() for item in document_ids if str(item).strip()))
+    if not normalized_ids:
+        return {
+            "removed_documents": 0,
+            "removed_chunks": 0,
+            "documents_indexed": 0,
+            "chunks_indexed": 0,
+            "changed": False,
+            "full_rebuild": False,
+            "embedded_documents": 0,
+        }
+    if not index_path.exists():
+        raise RuntimeError("Semantic index does not exist.")
+
+    def report(phase: str, percent: int, detail: str) -> None:
+        if progress_callback is not None:
+            progress_callback(phase, percent, detail)
+
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    report("opening_index", 35, "Opening the semantic index...")
+    with closing(sqlite3.connect(index_path, timeout=30)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            report("removing_chunks", 50, "Removing document chunks...")
+            before_chunks = connection.total_changes
+            connection.executemany(
+                "DELETE FROM chunks WHERE document_id = ?",
+                [(document_id,) for document_id in normalized_ids],
+            )
+            removed_chunks = connection.total_changes - before_chunks
+
+            report("removing_documents", 68, "Removing document records...")
+            before_documents = connection.total_changes
+            connection.executemany(
+                "DELETE FROM documents WHERE document_id = ?",
+                [(document_id,) for document_id in normalized_ids],
+            )
+            removed_documents = connection.total_changes - before_documents
+
+            report("updating_metadata", 82, "Updating semantic index metadata...")
+            document_count = int(
+                connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            )
+            chunk_count = int(
+                connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            )
+            connection.executemany(
+                """
+                INSERT INTO metadata (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                [
+                    ("documents_indexed", str(document_count)),
+                    ("chunks_indexed", str(chunk_count)),
+                ],
+            )
+            report("committing", 92, "Committing database changes...")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    return {
+        "removed_documents": removed_documents,
+        "removed_chunks": removed_chunks,
+        "documents_indexed": document_count,
+        "chunks_indexed": chunk_count,
+        "changed": bool(removed_documents or removed_chunks),
+        "full_rebuild": False,
+        "embedded_documents": 0,
     }
 
 

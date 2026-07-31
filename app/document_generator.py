@@ -10,6 +10,20 @@ from xml.sax.saxutils import escape as xml_escape
 import zipfile
 
 from openai import OpenAI
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from app.config import Settings
 from app.datastore import BaseDocumentStore, DocumentRecord, RetrievalContext
@@ -21,6 +35,7 @@ from app.reasoning_profiles import get_chat_reasoning_profile
 TEXT_MIME_TYPE = "text/plain; charset=utf-8"
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PDF_MIME_TYPE = "application/pdf"
 SOURCE_SHEET_NAME = "Sources"
 DEFAULT_TEXT_DOCUMENT_NAME = "generated-document"
 DEFAULT_WORKBOOK_NAME = "generated-workbook"
@@ -116,6 +131,9 @@ class ContextDocumentGenerator:
         if output_format == "docx":
             content_bytes = self._build_docx_bytes(title=normalized_title, content=document_text)
             mime_type = DOCX_MIME_TYPE
+        elif output_format == "pdf":
+            content_bytes = self._build_pdf_bytes(title=normalized_title, content=document_text)
+            mime_type = PDF_MIME_TYPE
         else:
             content_bytes = document_text.encode("utf-8")
             mime_type = TEXT_MIME_TYPE
@@ -488,6 +506,284 @@ class ContextDocumentGenerator:
             )
             archive.writestr("word/document.xml", document_xml)
         return buffer.getvalue()
+
+    def _build_pdf_bytes(self, *, title: str, content: str) -> bytes:
+        buffer = io.BytesIO()
+        styles = getSampleStyleSheet()
+        body_style = ParagraphStyle(
+            "AskJennyBody",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=10.5,
+            leading=15,
+            textColor=colors.HexColor("#263238"),
+            spaceAfter=7,
+        )
+        title_style = ParagraphStyle(
+            "AskJennyTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=22,
+            leading=27,
+            alignment=TA_LEFT,
+            textColor=colors.HexColor("#173F35"),
+            spaceAfter=18,
+        )
+        heading_style = ParagraphStyle(
+            "AskJennyHeading",
+            parent=styles["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=14,
+            leading=18,
+            textColor=colors.HexColor("#1E5A49"),
+            spaceBefore=10,
+            spaceAfter=7,
+            keepWithNext=True,
+        )
+        subheading_style = ParagraphStyle(
+            "AskJennySubheading",
+            parent=styles["Heading3"],
+            fontName="Helvetica-Bold",
+            fontSize=11.5,
+            leading=15,
+            textColor=colors.HexColor("#294C43"),
+            spaceBefore=7,
+            spaceAfter=5,
+            keepWithNext=True,
+        )
+        source_style = ParagraphStyle(
+            "AskJennySource",
+            parent=body_style,
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#52635E"),
+            leftIndent=8,
+        )
+        bullet_style = ParagraphStyle(
+            "AskJennyBullet",
+            parent=body_style,
+            leftIndent=16,
+            firstLineIndent=-10,
+            spaceAfter=3,
+        )
+        document = SimpleDocTemplate(
+            buffer,
+            pagesize=LETTER,
+            rightMargin=0.72 * inch,
+            leftMargin=0.72 * inch,
+            topMargin=0.78 * inch,
+            bottomMargin=0.72 * inch,
+            title=title,
+            author="Ask Jenny",
+            subject="Generated from the internal document library",
+        )
+        story: list[Any] = [
+            Paragraph(self._pdf_inline_markup(title), title_style),
+            Spacer(1, 2),
+        ]
+        lines = str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        index = 0
+        in_sources = False
+        while index < len(lines):
+            raw_line = lines[index].strip()
+            if not raw_line:
+                story.append(Spacer(1, 5))
+                index += 1
+                continue
+            if raw_line.lower() == "sources":
+                if story:
+                    story.append(PageBreak())
+                story.append(Paragraph("Sources", heading_style))
+                in_sources = True
+                index += 1
+                continue
+            table_rows, consumed = self._parse_pdf_markdown_table(lines, index)
+            if table_rows:
+                story.append(self._build_pdf_table(table_rows, document.width, body_style))
+                story.append(Spacer(1, 8))
+                index += consumed
+                continue
+            bullet_match = re.match(r"^(?:[-*]|\u2022)\s+(.+)$", raw_line)
+            if bullet_match:
+                while index < len(lines):
+                    match = re.match(r"^(?:[-*]|\u2022)\s+(.+)$", lines[index].strip())
+                    if not match:
+                        break
+                    story.append(
+                        Paragraph(
+                            f"- {self._pdf_inline_markup(match.group(1))}",
+                            source_style if in_sources else bullet_style,
+                        )
+                    )
+                    index += 1
+                story.append(Spacer(1, 3))
+                continue
+            heading_text, heading_level = self._classify_pdf_heading(raw_line)
+            if heading_level:
+                story.append(
+                    Paragraph(
+                        self._pdf_inline_markup(heading_text),
+                        heading_style if heading_level == 1 else subheading_style,
+                    )
+                )
+            else:
+                paragraph_lines = [raw_line]
+                index += 1
+                while index < len(lines):
+                    candidate = lines[index].strip()
+                    if (
+                        not candidate
+                        or candidate.lower() == "sources"
+                        or re.match(r"^(?:[-*]|\u2022)\s+", candidate)
+                        or self._classify_pdf_heading(candidate)[1]
+                        or self._parse_pdf_markdown_table(lines, index)[0]
+                    ):
+                        break
+                    paragraph_lines.append(candidate)
+                    index += 1
+                story.append(
+                    Paragraph(
+                        self._pdf_inline_markup(" ".join(paragraph_lines)),
+                        source_style if in_sources else body_style,
+                    )
+                )
+                continue
+            index += 1
+
+        document.build(
+            story,
+            onFirstPage=lambda canvas, doc: self._draw_pdf_page_frame(canvas, doc, title),
+            onLaterPages=lambda canvas, doc: self._draw_pdf_page_frame(canvas, doc, title),
+        )
+        return buffer.getvalue()
+
+    def _draw_pdf_page_frame(self, canvas: Any, document: Any, title: str) -> None:
+        canvas.saveState()
+        page_width, page_height = LETTER
+        header_text = title if len(title) <= 72 else f"{title[:69].rstrip()}..."
+        canvas.setStrokeColor(colors.HexColor("#D6E2DE"))
+        canvas.setLineWidth(0.5)
+        canvas.line(document.leftMargin, page_height - 0.48 * inch, page_width - document.rightMargin, page_height - 0.48 * inch)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#657670"))
+        canvas.drawString(document.leftMargin, page_height - 0.38 * inch, header_text)
+        page_label = f"Page {document.page}"
+        canvas.drawRightString(page_width - document.rightMargin, 0.38 * inch, page_label)
+        canvas.setStrokeColor(colors.HexColor("#D6E2DE"))
+        canvas.line(document.leftMargin, 0.52 * inch, page_width - document.rightMargin, 0.52 * inch)
+        canvas.restoreState()
+
+    def _classify_pdf_heading(self, line: str) -> tuple[str, int]:
+        markdown_heading = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if markdown_heading:
+            return markdown_heading.group(2).strip(), 1 if len(markdown_heading.group(1)) <= 2 else 2
+        if len(line) <= 80 and line.endswith(":"):
+            return line[:-1].strip(), 2
+        if (
+            len(line) <= 72
+            and not line.endswith((".", "?", "!", ";"))
+            and len(line.split()) <= 9
+        ):
+            return line, 1
+        return line, 0
+
+    def _parse_pdf_markdown_table(
+        self,
+        lines: list[str],
+        start_index: int,
+    ) -> tuple[list[list[str]], int]:
+        if start_index + 1 >= len(lines):
+            return [], 0
+        header = lines[start_index].strip()
+        separator = lines[start_index + 1].strip()
+        if "|" not in header or not re.match(r"^\|?\s*:?-{3,}", separator):
+            return [], 0
+
+        def split_row(value: str) -> list[str]:
+            return [cell.strip() for cell in value.strip().strip("|").split("|")]
+
+        rows = [split_row(header)]
+        index = start_index + 2
+        while index < len(lines) and "|" in lines[index] and lines[index].strip():
+            row = split_row(lines[index])
+            if len(row) == len(rows[0]):
+                rows.append(row)
+            index += 1
+        return (rows, index - start_index) if len(rows) > 1 else ([], 0)
+
+    def _build_pdf_table(
+        self,
+        rows: list[list[str]],
+        available_width: float,
+        body_style: ParagraphStyle,
+    ) -> Table:
+        column_count = max(1, len(rows[0]))
+        widths = [1.0] * column_count
+        for column_index in range(column_count):
+            longest = max(
+                (
+                    stringWidth(
+                        re.sub(r"[*_`]", "", row[column_index])[:80],
+                        "Helvetica",
+                        9,
+                    )
+                    for row in rows
+                ),
+                default=1.0,
+            )
+            widths[column_index] = max(0.75 * inch, min(longest + 18, 2.8 * inch))
+        total_width = sum(widths)
+        if total_width > available_width:
+            scale = available_width / total_width
+            widths = [width * scale for width in widths]
+        cell_style = ParagraphStyle(
+            "AskJennyTableCell",
+            parent=body_style,
+            fontSize=8.5,
+            leading=11,
+            spaceAfter=0,
+        )
+        header_cell_style = ParagraphStyle(
+            "AskJennyTableHeaderCell",
+            parent=cell_style,
+            fontName="Helvetica-Bold",
+            textColor=colors.white,
+        )
+        table_data = [
+            [
+                Paragraph(
+                    self._pdf_inline_markup(cell),
+                    header_cell_style if row_index == 0 else cell_style,
+                )
+                for cell in row
+            ]
+            for row_index, row in enumerate(rows)
+        ]
+        table = Table(table_data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E5A49")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD8D4")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F8F6")]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+        return table
+
+    def _pdf_inline_markup(self, value: str) -> str:
+        escaped = xml_escape(str(value or "").replace("\u2011", "-"))
+        escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+        escaped = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<i>\1</i>", escaped)
+        escaped = re.sub(r"`([^`]+?)`", r'<font name="Courier">\1</font>', escaped)
+        return escaped
 
     def _build_docx_document_xml(self, paragraphs: list[str]) -> str:
         body = []

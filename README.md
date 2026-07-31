@@ -102,6 +102,10 @@ Double-clicking the icon opens the application. Windows may initially place the
 icon in the notification-area overflow menu; drag it onto the taskbar to keep it
 permanently visible.
 
+If Ask Jenny is already running, double-clicking `AskJenny.exe` checks for an
+open Ask Jenny browser tab. It opens the application in the default browser only
+when no live application tab is detected, avoiding duplicate tabs.
+
 To rebuild the executable after changing its icon, metadata, or launcher code:
 
 ```powershell
@@ -117,6 +121,60 @@ If you are actively editing code and want auto-reload, use:
 ```
 
 If you want the older lexical fallback instead, set `DOCSTORE_BACKEND=json`.
+
+### User accounts
+
+Use the account badge in the top-right corner to sign in or create an account.
+Accounts use a unique username rather than requiring an unverified email
+address. Self-service sign-up always creates a **Member** account; the browser
+does not offer role or permission assignment. Passwords are salted and hashed,
+and signed-in sessions use an HttpOnly cookie.
+
+Saved conversations are private to their owner. Existing conversations without
+ownership metadata are assigned to the default Administrator during migration.
+New conversations are attached to the signed-in user, and list, load, update,
+and delete operations are filtered by that owner.
+
+Users can attach up to five JPEG, PNG, WebP, or GIF images to a chat message by
+choosing files, pasting from the clipboard, or dragging images onto the
+composer. Each image can be up to 8 MB. Attachments are sent as multimodal model
+input and saved with the private conversation.
+
+In **Context: Global**, the agent can find an official datasheet, manual,
+specification, or other public PDF and attach the original file to the private
+conversation. Retrieved source PDFs are not OCRed, embedded, synchronized, or
+added to the document library. Retrieval accepts direct public HTTPS links only,
+blocks local/private network destinations (including redirects), verifies the
+PDF signature, and preserves the downloaded bytes. The default limit is 20 MB;
+configure `SOURCE_DOWNLOAD_TIMEOUT_SECONDS` and `SOURCE_DOWNLOAD_MAX_BYTES` if
+needed.
+
+Internet-enabled chat requests are bounded so a failed search or slow download
+cannot run indefinitely. By default, a response has a 120-second overall budget,
+an individual OpenAI call has a 60-second ceiling with automatic retries
+disabled, the agent can perform at most five model/tool rounds, and it can make
+only one source-PDF download attempt. The composer exposes **Cancel response**
+while a request is active. Configure these limits with
+`CHAT_REQUEST_TIMEOUT_SECONDS`, `OPENAI_REQUEST_TIMEOUT_SECONDS`,
+`CHAT_MAX_TOOL_ROUNDS`, and `SOURCE_DOWNLOAD_MAX_ATTEMPTS`.
+
+Requests containing two to eight product model numbers and the word
+“datasheet” use the bounded batch-retrieval path. Each model is searched
+independently and in parallel, successful original PDFs are attached as
+separate private-conversation downloads, duplicates are removed, and a failure
+for one product does not discard the other successful files. The response
+shows an elapsed-time retrieval status while the batch is active.
+
+The application creates a default Administrator account on first startup:
+
+- Username: `admin`
+- Temporary password: `Administrator!1`
+
+The Administrator must replace that temporary password after the first sign-in.
+Override the bootstrap values with `DEFAULT_ADMIN_USERNAME`,
+`DEFAULT_ADMIN_DISPLAY_NAME`, and `DEFAULT_ADMIN_PASSWORD`. Account records and
+server-side session tokens are stored in `app/data/application.sqlite` by
+default; change the location with `APPLICATION_DATABASE_PATH`.
 
 ## Portable Docker setup
 
@@ -188,6 +246,7 @@ Upload behavior:
 
 - The upload form lives inside the document browser
 - Supported direct file types are `.txt`, `.md`, `.rst`, `.csv`, `.html`, `.log`, `.pdf`, Word `.docx`/`.docm`, Excel `.xlsx`/`.xlsm`/`.xltx`/`.xltm`, and structured `.json`
+- The document generator can create downloadable TXT, editable DOCX, polished PDF, and XLSX files from the selected internal library scope. Generated PDFs include styled headings, bullets, tables, source references, headers, footers, and page numbers.
 - PDF ingestion preserves page boundaries and automatically OCRs scanned or image-only pages; encrypted PDFs must be unlocked before upload
 - Structured `.json` uploads can contain one document object or an array of document objects using the same schema as `app/data/sample_documents.json`
 - In `semantic` mode, each upload automatically rebuilds the semantic index so the new document is immediately searchable
@@ -198,6 +257,18 @@ Upload behavior:
 ### PDF OCR setup
 
 PDF rendering is installed through `requirements.txt`. OCR providers are interchangeable and selected with `PDF_OCR_ENGINE`.
+
+PDF ingestion uses a hybrid image-understanding pipeline:
+
+- Native PDF text is preserved.
+- RapidOCR reads text from scanned pages and from embedded images on otherwise text-rich pages.
+- Duplicate OCR lines are removed before indexing.
+- Bounded GPT-5.6 Luna vision batches describe charts, diagrams, photographs, callouts, legends, equipment, and spatial relationships that OCR cannot interpret.
+- Vision failures are logged and do not discard otherwise extractable document text.
+
+Vision analysis is enabled by default when `OPENAI_API_KEY` is configured. It prioritizes image-bearing, scanned, and graphics-heavy pages and analyzes at most 12 pages per PDF by default. Configure the limits with `PDF_VISION_MAX_PAGES`, `PDF_VISION_BATCH_SIZE`, `PDF_VISION_DPI`, and `PDF_VISION_MAX_DIMENSION`, or disable external image analysis with `PDF_VISION_ENABLED=false`. Mixed-page image OCR can be controlled independently with `PDF_IMAGE_OCR_ENABLED` and `PDF_IMAGE_OCR_MAX_PAGES`.
+
+Semantic document deletion uses an atomic in-place SQLite transaction. Deletion-only operations remove the selected document and chunk rows without copying the entire index or regenerating unchanged embeddings. The library UI streams real deletion phases, percentage completion, and elapsed time while the operation runs.
 
 The default `tesseract` provider requires the Tesseract command-line program and the language data used by your documents. Docker installs both automatically. For a native installation, install Tesseract on the application server, make sure `tesseract` is on `PATH`, and restart the app. If it is installed elsewhere, set `PDF_OCR_TESSERACT_CMD` to the full executable path.
 
@@ -332,14 +403,14 @@ Expected document response body:
 ## Important MVP limits
 
 - Sessions are in memory only
-- There is no authentication or RBAC yet
+- Local accounts authenticate with passwords and own private conversations, but shared-library role enforcement is not connected yet
 - The UI is intentionally lightweight
 - The local semantic index uses brute-force vector scanning in SQLite, not a dedicated vector database
 - The `json` backend is still lexical and exists as a fallback/debug mode
 
 ## Recommended next steps
 
-1. Add SSO and per-user audit logging.
+1. Enforce user roles for shared-library administration and optionally connect team SSO.
 2. Move semantic indexing and retrieval into your internal datastore service.
 3. Add a background ingestion pipeline for processed documents.
 4. Add role-based tool access for business actions.

@@ -27,12 +27,21 @@ try {
 }
 
 if (-not $mutexAcquired) {
-    [System.Windows.Forms.MessageBox]::Show(
-        "Ask Jenny is already running in the system tray.",
-        "Ask Jenny",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information
-    ) | Out-Null
+    $browserSessionActive = $false
+    try {
+        $browserSessionStatus = Invoke-RestMethod `
+            -Uri "$serverUrl/api/ui-sessions/active" `
+            -Method Get `
+            -TimeoutSec 3
+        $browserSessionActive = $browserSessionStatus.active -eq $true
+    } catch {
+        $browserSessionActive = $false
+    }
+
+    if (-not $browserSessionActive) {
+        Start-Process $serverUrl
+    }
+
     $trayMutex.Dispose()
     exit 0
 }

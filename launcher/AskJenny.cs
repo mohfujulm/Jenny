@@ -1,7 +1,10 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("AskJenny")]
@@ -15,9 +18,23 @@ using System.Windows.Forms;
 
 internal static class AskJennyLauncher
 {
+    private const string ApplicationUrl = "http://127.0.0.1:8000";
+    private const string BrowserSessionStatusUrl =
+        ApplicationUrl + "/api/ui-sessions/active";
+    private const string TrayMutexName = @"Local\AskJennyServerTray";
+
     [STAThread]
     private static void Main()
     {
+        if (IsTrayRunning())
+        {
+            if (!HasActiveBrowserSession())
+            {
+                OpenApplicationInBrowser();
+            }
+            return;
+        }
+
         string applicationRoot = FindApplicationRoot();
         if (applicationRoot == null)
         {
@@ -51,6 +68,79 @@ internal static class AskJennyLauncher
         {
             MessageBox.Show(
                 "AskJenny could not start the tray application.\n\n" + exception.Message,
+                "AskJenny",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error
+            );
+        }
+    }
+
+    private static bool IsTrayRunning()
+    {
+        try
+        {
+            using (Mutex existingMutex = Mutex.OpenExisting(TrayMutexName))
+            {
+                return true;
+            }
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    private static bool HasActiveBrowserSession()
+    {
+        try
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
+                BrowserSessionStatusUrl
+            );
+            request.Method = "GET";
+            request.Timeout = 2500;
+            request.ReadWriteTimeout = 2500;
+            request.CachePolicy = new System.Net.Cache.RequestCachePolicy(
+                System.Net.Cache.RequestCacheLevel.NoCacheNoStore
+            );
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream responseStream = response.GetResponseStream())
+            using (StreamReader reader = new StreamReader(responseStream))
+            {
+                string payload = reader.ReadToEnd();
+                return Regex.IsMatch(
+                    payload,
+                    "\"active\"\\s*:\\s*true",
+                    RegexOptions.IgnoreCase
+                );
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void OpenApplicationInBrowser()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = ApplicationUrl,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(
+                "AskJenny could not open the application in your browser.\n\n" +
+                exception.Message,
                 "AskJenny",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error
