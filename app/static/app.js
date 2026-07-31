@@ -23,10 +23,22 @@ const FOLDER_DOUBLE_CLICK_WINDOW_MS = 650;
 const PREVIEW_ZOOM_MIN = 0.5;
 const PREVIEW_ZOOM_MAX = 2.5;
 const PREVIEW_ZOOM_STEP = 0.1;
+const UI_SESSION_HEARTBEAT_INTERVAL_MS = 15000;
+const CHAT_CLIENT_TIMEOUT_MS = 125000;
+const CHAT_IMAGE_MAX_COUNT = 5;
+const CHAT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+const CHAT_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
+const uiSessionId = crypto.randomUUID();
 const conversationPreferenceSyncTimers = new Map();
 let conversationScrollSaveTimer = null;
 let imageLightboxReturnFocus = null;
-let healthRefreshTimer = null;
+let uiSessionHeartbeatTimer = null;
+let userManagementReturnFocus = null;
 let lastFolderControlClick = {
   folderId: null,
   control: null,
@@ -40,7 +52,12 @@ const state = {
   sourceMode: "broader",
   reasoningMode: "standard",
   sending: false,
+  activeChatRequestId: null,
+  activeChatAbortController: null,
+  cancelledChatRequestId: null,
+  chatImages: [],
   responseIndicatorNode: null,
+  responseIndicatorTimer: null,
   messages: [],
   memory: {
     conversations: [],
@@ -68,6 +85,12 @@ const state = {
   generation: {
     inFlight: false,
   },
+  auth: {
+    user: null,
+    loaded: false,
+    inFlight: false,
+    view: "signin",
+  },
   library: {
     backend: null,
     totalDocuments: 0,
@@ -88,6 +111,7 @@ const state = {
     uploadInFlight: false,
     metadataUpdateInFlight: false,
     deleteInFlight: false,
+    deleteProgress: null,
     deleteSelectionIds: [],
     editorDocumentId: null,
     editorDirty: false,
@@ -120,10 +144,51 @@ const state = {
   },
 };
 
+async function heartbeatUiSession() {
+  try {
+    await fetch(`/api/ui-sessions/${encodeURIComponent(uiSessionId)}`, {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+    });
+  } catch {
+    // The next heartbeat will retry after transient server or network failures.
+  }
+}
+
+function startUiSessionHeartbeat() {
+  if (uiSessionHeartbeatTimer !== null) {
+    return;
+  }
+  void heartbeatUiSession();
+  uiSessionHeartbeatTimer = window.setInterval(
+    heartbeatUiSession,
+    UI_SESSION_HEARTBEAT_INTERVAL_MS
+  );
+}
+
+function stopUiSessionHeartbeat() {
+  if (uiSessionHeartbeatTimer !== null) {
+    window.clearInterval(uiSessionHeartbeatTimer);
+    uiSessionHeartbeatTimer = null;
+  }
+  void fetch(`/api/ui-sessions/${encodeURIComponent(uiSessionId)}`, {
+    method: "DELETE",
+    cache: "no-store",
+    keepalive: true,
+  }).catch(() => {
+    // Expired sessions are pruned server-side if the browser cannot send this request.
+  });
+}
+
 const messageList = document.getElementById("messageList");
 const composerForm = document.getElementById("composerForm");
 const messageInput = document.getElementById("messageInput");
 const sendButton = document.getElementById("sendButton");
+const cancelResponseButton = document.getElementById("cancelResponseButton");
+const chatImageInput = document.getElementById("chatImageInput");
+const addChatImagesButton = document.getElementById("addChatImagesButton");
+const chatImagePreviewList = document.getElementById("chatImagePreviewList");
 const sourceModeButton = document.getElementById("sourceModeButton");
 const sourceModeLabel = document.getElementById("sourceModeLabel");
 const reasoningModeButton = document.getElementById("reasoningModeButton");
@@ -136,12 +201,49 @@ const conversationMemoryStatus = document.getElementById("conversationMemoryStat
 const savedConversationContextMenu = document.getElementById("savedConversationContextMenu");
 const savedConversationRenameButton = document.getElementById("savedConversationRenameButton");
 const savedConversationDeleteButton = document.getElementById("savedConversationDeleteButton");
-const statusPill = document.getElementById("statusPill");
 const messageTemplate = document.getElementById("messageTemplate");
 const composerNote = document.getElementById("composerNote");
 const contextSummary = document.getElementById("contextSummary");
 const contextChipList = document.getElementById("contextChipList");
 const openLibraryButton = document.getElementById("openLibraryButton");
+const userLoginBadge = document.getElementById("userLoginBadge");
+const userLoginLabel = document.getElementById("userLoginLabel");
+const userManagementModal = document.getElementById("userManagementModal");
+const userManagementBackdrop = document.getElementById("userManagementBackdrop");
+const closeUserManagementButton = document.getElementById("closeUserManagementButton");
+const userManagementTitle = document.getElementById("userManagementTitle");
+const authEyebrow = document.getElementById("authEyebrow");
+const authDescription = document.getElementById("authDescription");
+const authSignedOutView = document.getElementById("authSignedOutView");
+const authAccountView = document.getElementById("authAccountView");
+const showSignInButton = document.getElementById("showSignInButton");
+const showSignUpButton = document.getElementById("showSignUpButton");
+const signInForm = document.getElementById("signInForm");
+const signInUsernameInput = document.getElementById("signInUsernameInput");
+const signInPasswordInput = document.getElementById("signInPasswordInput");
+const signInSubmitButton = document.getElementById("signInSubmitButton");
+const signUpForm = document.getElementById("signUpForm");
+const signUpDisplayNameInput = document.getElementById("signUpDisplayNameInput");
+const signUpUsernameInput = document.getElementById("signUpUsernameInput");
+const signUpPasswordInput = document.getElementById("signUpPasswordInput");
+const signUpPasswordConfirmInput = document.getElementById("signUpPasswordConfirmInput");
+const signUpSubmitButton = document.getElementById("signUpSubmitButton");
+const accountAvatar = document.getElementById("accountAvatar");
+const accountDisplayName = document.getElementById("accountDisplayName");
+const accountUsername = document.getElementById("accountUsername");
+const accountRole = document.getElementById("accountRole");
+const showChangePasswordButton = document.getElementById("showChangePasswordButton");
+const signOutButton = document.getElementById("signOutButton");
+const changePasswordForm = document.getElementById("changePasswordForm");
+const changePasswordTitle = document.getElementById("changePasswordTitle");
+const changePasswordGuidance = document.getElementById("changePasswordGuidance");
+const currentPasswordInput = document.getElementById("currentPasswordInput");
+const newPasswordInput = document.getElementById("newPasswordInput");
+const newPasswordConfirmInput = document.getElementById("newPasswordConfirmInput");
+const changePasswordSubmitButton = document.getElementById("changePasswordSubmitButton");
+const cancelChangePasswordButton = document.getElementById("cancelChangePasswordButton");
+const forcedSignOutButton = document.getElementById("forcedSignOutButton");
+const userManagementStatus = document.getElementById("userManagementStatus");
 const documentGenerationForm = document.getElementById("documentGenerationForm");
 const documentGenerationTitleInput = document.getElementById("documentGenerationTitleInput");
 const documentGenerationFormatSelect = document.getElementById("documentGenerationFormatSelect");
@@ -219,6 +321,10 @@ const syncSelectedFolderButton = document.getElementById("syncSelectedFolderButt
 const closeFolderPropertiesButton = document.getElementById("closeFolderPropertiesButton");
 const deleteSelectionSummary = document.getElementById("deleteSelectionSummary");
 const deleteChipList = document.getElementById("deleteChipList");
+const deleteProgressPanel = document.getElementById("deleteProgressPanel");
+const deleteProgressTrack = document.getElementById("deleteProgressTrack");
+const deleteProgressBar = document.getElementById("deleteProgressBar");
+const deleteProgressLabel = document.getElementById("deleteProgressLabel");
 const libraryActionStatus = document.getElementById("libraryActionStatus");
 const uploadForm = document.getElementById("uploadForm");
 const uploadFileInput = document.getElementById("uploadFileInput");
@@ -886,6 +992,9 @@ function forgetConversationScrollPosition(conversationId) {
 }
 
 async function syncConversationPreferences(conversationId, preferences) {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    return;
+  }
   try {
     const normalized = normalizeConversationPreferences(preferences);
     const response = await fetch("/api/conversations/settings", {
@@ -920,6 +1029,9 @@ async function syncConversationPreferences(conversationId, preferences) {
 }
 
 function persistActiveConversationPreferences() {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    return;
+  }
   const conversationId = state.conversationId;
   const preferences = rememberConversationPreferences(conversationId);
   const existingTimer = conversationPreferenceSyncTimers.get(conversationId);
@@ -1629,9 +1741,294 @@ async function parseJsonResponse(response) {
   }
 }
 
+function formatUserRole(role) {
+  if (role === "admin") {
+    return "Administrator";
+  }
+  if (role === "library_manager") {
+    return "Library manager";
+  }
+  return "Member";
+}
+
+function setUserManagementStatus(message, tone = "neutral") {
+  userManagementStatus.textContent = message;
+  userManagementStatus.dataset.tone = tone;
+}
+
+function authInitials(user) {
+  return String(user?.display_name || user?.username || "U")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase() || "U";
+}
+
+function applyAuthenticationGate() {
+  const authenticated =
+    Boolean(state.auth.user) && !state.auth.user.must_change_password;
+  newConversationButton.disabled = !authenticated;
+  conversationSearchInput.disabled = !authenticated;
+  messageInput.placeholder = authenticated
+    ? "Ask about policies, documents, onboarding, billing, support, or general questions."
+    : "Sign in to start a private conversation.";
+  setComposerState(state.sending);
+  renderSavedConversationList();
+  renderConversationSaveButton();
+  updateConversationMemoryStatus();
+}
+
+function clearConversationWorkspaceForAuth() {
+  state.memory.conversations = [];
+  state.memory.loaded = true;
+  state.memory.loadError = null;
+  state.memory.searchQuery = "";
+  conversationSearchInput.value = "";
+  resetConversation({ rememberCurrentScroll: false });
+  applyAuthenticationGate();
+}
+
+async function activateAuthenticatedConversationWorkspace() {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    clearConversationWorkspaceForAuth();
+    return;
+  }
+  state.memory.conversations = [];
+  state.memory.loaded = false;
+  state.memory.loadError = null;
+  resetConversation({ rememberCurrentScroll: false });
+  applyAuthenticationGate();
+  await loadSavedConversations({ openMostRecent: true });
+}
+
+function renderAuth() {
+  const user = state.auth.user;
+  const authenticated = Boolean(user);
+  const forcedChange = Boolean(user?.must_change_password);
+  if (forcedChange) {
+    state.auth.view = "change";
+  }
+
+  userLoginLabel.textContent = authenticated ? user.display_name : "Sign in";
+  userLoginBadge.setAttribute(
+    "aria-label",
+    authenticated ? `Open account for ${user.display_name}` : "Sign in or create an account"
+  );
+  userLoginBadge.title = userLoginBadge.getAttribute("aria-label");
+
+  const signedOut = !authenticated;
+  authSignedOutView.classList.toggle("is-hidden", !signedOut);
+  authAccountView.classList.toggle(
+    "is-hidden",
+    signedOut || state.auth.view !== "account"
+  );
+  changePasswordForm.classList.toggle(
+    "is-hidden",
+    signedOut || state.auth.view !== "change"
+  );
+
+  const showingSignup = state.auth.view === "signup";
+  showSignInButton.classList.toggle("is-active", !showingSignup);
+  showSignInButton.setAttribute("aria-selected", String(!showingSignup));
+  showSignUpButton.classList.toggle("is-active", showingSignup);
+  showSignUpButton.setAttribute("aria-selected", String(showingSignup));
+  signInForm.classList.toggle("is-hidden", showingSignup);
+  signUpForm.classList.toggle("is-hidden", !showingSignup);
+
+  if (authenticated) {
+    accountAvatar.textContent = authInitials(user);
+    accountDisplayName.textContent = user.display_name;
+    accountUsername.textContent = `@${user.username}`;
+    accountRole.textContent = formatUserRole(user.role);
+  }
+
+  closeUserManagementButton.disabled = forcedChange;
+  closeUserManagementButton.classList.toggle("is-hidden", forcedChange);
+  cancelChangePasswordButton.classList.toggle("is-hidden", forcedChange);
+  forcedSignOutButton.classList.toggle("is-hidden", !forcedChange);
+  changePasswordTitle.textContent = forcedChange
+    ? "Set a new password"
+    : "Change your password";
+  changePasswordGuidance.textContent = forcedChange
+    ? "For security, replace the temporary Administrator password before continuing."
+    : "Enter your current password and choose a new one.";
+
+  if (signedOut) {
+    authEyebrow.textContent = "Your account";
+    userManagementTitle.textContent = showingSignup ? "Create your account" : "Welcome back";
+    authDescription.textContent = showingSignup
+      ? "Sign up for your own conversations and access to the shared library."
+      : "Sign in to access your account.";
+  } else {
+    authEyebrow.textContent = forcedChange ? "First-time setup" : "Your account";
+    userManagementTitle.textContent = forcedChange
+      ? "Secure the Administrator account"
+      : user.display_name;
+    authDescription.textContent = forcedChange
+      ? "The temporary password must be changed before you continue."
+      : "Review your account or update your password.";
+  }
+  applyAuthenticationGate();
+}
+
+async function loadAuthSession() {
+  try {
+    const response = await fetch("/api/auth/session", { cache: "no-store" });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Could not load your account.");
+    }
+    state.auth.user = payload?.authenticated ? payload.user : null;
+    state.auth.view = state.auth.user
+      ? (state.auth.user.must_change_password ? "change" : "account")
+      : "signin";
+  } catch (error) {
+    state.auth.user = null;
+    setUserManagementStatus(error.message, "error");
+  }
+  state.auth.loaded = true;
+  renderAuth();
+}
+
+async function initializeAuthenticatedWorkspace() {
+  await loadAuthSession();
+  if (state.auth.user && !state.auth.user.must_change_password) {
+    await activateAuthenticatedConversationWorkspace();
+  } else {
+    clearConversationWorkspaceForAuth();
+  }
+}
+
+function openUserManagement(returnFocus = userLoginBadge) {
+  closeSavedConversationContextMenu();
+  userManagementReturnFocus = returnFocus;
+  state.auth.view = state.auth.user
+    ? (state.auth.user.must_change_password ? "change" : "account")
+    : "signin";
+  renderAuth();
+  userManagementModal.classList.remove("is-hidden");
+  userManagementModal.setAttribute("aria-hidden", "false");
+  setUserManagementStatus("", "neutral");
+  window.requestAnimationFrame(() => {
+    if (state.auth.view === "signin") {
+      signInUsernameInput.focus();
+    } else if (state.auth.view === "change") {
+      currentPasswordInput.focus();
+    } else {
+      showChangePasswordButton.focus();
+    }
+  });
+}
+
+function closeUserManagement() {
+  if (state.auth.user?.must_change_password) {
+    setUserManagementStatus("Change the temporary password or sign out.", "error");
+    currentPasswordInput.focus();
+    return;
+  }
+  userManagementModal.classList.add("is-hidden");
+  userManagementModal.setAttribute("aria-hidden", "true");
+  const returnFocus = userManagementReturnFocus || userLoginBadge;
+  userManagementReturnFocus = null;
+  returnFocus.focus();
+}
+
+function setAuthView(view) {
+  state.auth.view = view;
+  setUserManagementStatus("", "neutral");
+  renderAuth();
+  window.requestAnimationFrame(() => {
+    if (view === "signup") {
+      signUpDisplayNameInput.focus();
+    } else if (view === "signin") {
+      signInUsernameInput.focus();
+    } else if (view === "change") {
+      currentPasswordInput.focus();
+    }
+  });
+}
+
+async function submitAuth(endpoint, body, button, busyLabel) {
+  if (state.auth.inFlight) {
+    return;
+  }
+  state.auth.inFlight = true;
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = busyLabel;
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Account request failed.");
+    }
+    state.auth.user = payload.user || null;
+    state.auth.view = state.auth.user?.must_change_password ? "change" : "account";
+    renderAuth();
+    if (state.auth.user && !state.auth.user.must_change_password) {
+      await activateAuthenticatedConversationWorkspace();
+    } else {
+      clearConversationWorkspaceForAuth();
+    }
+    setUserManagementStatus(payload.message || "Account updated.", "success");
+    return true;
+  } catch (error) {
+    setUserManagementStatus(error.message, "error");
+    return false;
+  } finally {
+    state.auth.inFlight = false;
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+async function signOut() {
+  if (state.auth.inFlight) {
+    return;
+  }
+  state.auth.inFlight = true;
+  try {
+    const response = await fetch("/api/auth/logout", { method: "POST" });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Could not sign out.");
+    }
+    state.auth.user = null;
+    state.auth.view = "signin";
+    renderAuth();
+    clearConversationWorkspaceForAuth();
+    setUserManagementStatus(payload.message || "Signed out.", "success");
+    signInPasswordInput.value = "";
+    window.requestAnimationFrame(() => signInUsernameInput.focus());
+  } catch (error) {
+    setUserManagementStatus(error.message, "error");
+  } finally {
+    state.auth.inFlight = false;
+  }
+}
+
 function normalizeConversationMessage(message) {
   const role = message && typeof message.role === "string" ? message.role : "assistant";
   const rawBody = typeof message.body === "string" ? message.body : "";
+  const legacyGeneratedDocument =
+    message && message.generatedDocument
+      ? { ...message.generatedDocument }
+      : message && message.generated_document
+        ? { ...message.generated_document }
+        : null;
+  const generatedDocuments = Array.isArray(message && message.generatedDocuments)
+    ? message.generatedDocuments.map((document) => ({ ...document }))
+    : Array.isArray(message && message.generated_documents)
+      ? message.generated_documents.map((document) => ({ ...document }))
+      : legacyGeneratedDocument
+        ? [legacyGeneratedDocument]
+        : [];
   return {
     role,
     label:
@@ -1643,6 +2040,22 @@ function normalizeConversationMessage(message) {
             ? "System"
             : "Assistant",
     body: role === "assistant" ? stripGeneratedUploadCitations(rawBody) : rawBody,
+    images: Array.isArray(message && message.images)
+      ? message.images
+          .filter(
+            (image) =>
+              image &&
+              CHAT_IMAGE_MIME_TYPES.has(image.mime_type) &&
+              typeof image.content_base64 === "string" &&
+              image.content_base64
+          )
+          .slice(0, CHAT_IMAGE_MAX_COUNT)
+          .map((image) => ({
+            filename: String(image.filename || "Attached image"),
+            mime_type: image.mime_type,
+            content_base64: image.content_base64,
+          }))
+      : [],
     citations: Array.isArray(message && message.citations)
       ? message.citations.map((item) => ({ ...item }))
       : [],
@@ -1651,13 +2064,119 @@ function normalizeConversationMessage(message) {
       : Array.isArray(message && message.tool_trace)
         ? message.tool_trace.map((item) => ({ ...item }))
         : [],
-    generatedDocument:
-      message && message.generatedDocument
-        ? { ...message.generatedDocument }
-        : message && message.generated_document
-          ? { ...message.generated_document }
-          : null,
+    generatedDocument: generatedDocuments[0] || legacyGeneratedDocument,
+    generatedDocuments,
   };
+}
+
+function renderChatImagePreviews() {
+  chatImagePreviewList.innerHTML = "";
+  chatImagePreviewList.classList.toggle("is-hidden", state.chatImages.length === 0);
+  state.chatImages.forEach((image) => {
+    const preview = document.createElement("div");
+    preview.className = "chat-image-preview";
+
+    const imageNode = document.createElement("img");
+    imageNode.src = `data:${image.mime_type};base64,${image.content_base64}`;
+    imageNode.alt = image.filename;
+    preview.appendChild(imageNode);
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "chat-image-remove";
+    removeButton.setAttribute("aria-label", `Remove ${image.filename}`);
+    removeButton.title = `Remove ${image.filename}`;
+    removeButton.textContent = "×";
+    removeButton.disabled = state.sending;
+    removeButton.addEventListener("click", () => {
+      state.chatImages = state.chatImages.filter((item) => item.id !== image.id);
+      renderChatImagePreviews();
+      messageInput.focus();
+    });
+    preview.appendChild(removeButton);
+    chatImagePreviewList.appendChild(preview);
+  });
+}
+
+function readChatImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const dataUrl = String(reader.result || "");
+      const separatorIndex = dataUrl.indexOf(",");
+      if (separatorIndex < 0) {
+        reject(new Error(`Could not read ${file.name}.`));
+        return;
+      }
+      resolve({
+        id: crypto.randomUUID(),
+        filename: file.name || "Attached image",
+        mime_type: file.type,
+        content_base64: dataUrl.slice(separatorIndex + 1),
+      });
+    });
+    reader.addEventListener("error", () => {
+      reject(new Error(`Could not read ${file.name}.`));
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addChatImageFiles(files) {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(userLoginBadge);
+    return;
+  }
+  const candidates = Array.from(files || []);
+  if (!candidates.length) {
+    return;
+  }
+
+  const remainingSlots = CHAT_IMAGE_MAX_COUNT - state.chatImages.length;
+  if (remainingSlots <= 0) {
+    setConversationMemoryStatus(
+      `Attach up to ${CHAT_IMAGE_MAX_COUNT} images per message.`,
+      "error"
+    );
+    return;
+  }
+
+  const accepted = [];
+  const rejected = [];
+  candidates.slice(0, remainingSlots).forEach((file) => {
+    if (!CHAT_IMAGE_MIME_TYPES.has(file.type)) {
+      rejected.push(`${file.name}: unsupported image type`);
+    } else if (file.size > CHAT_IMAGE_MAX_BYTES) {
+      rejected.push(`${file.name}: larger than 8 MB`);
+    } else {
+      accepted.push(file);
+    }
+  });
+  if (candidates.length > remainingSlots) {
+    rejected.push(`Only ${CHAT_IMAGE_MAX_COUNT} images can be attached`);
+  }
+
+  try {
+    const images = await Promise.all(accepted.map((file) => readChatImage(file)));
+    state.chatImages.push(...images);
+    renderChatImagePreviews();
+    if (rejected.length) {
+      setConversationMemoryStatus(rejected.join(". "), "error");
+    } else {
+      setConversationMemoryStatus(
+        `${state.chatImages.length} image${state.chatImages.length === 1 ? "" : "s"} ready to send.`,
+        "success"
+      );
+    }
+  } catch (error) {
+    setConversationMemoryStatus(error.message, "error");
+  }
+}
+
+function clearChatImages() {
+  state.chatImages = [];
+  chatImageInput.value = "";
+  renderChatImagePreviews();
 }
 
 function closeMessageActionMenu() {
@@ -1883,7 +2402,11 @@ function escapeHtml(value) {
 }
 
 function isSafeImageUrl(value) {
-  return /^https?:\/\//i.test(String(value || "").trim());
+  const normalized = String(value || "").trim();
+  return (
+    /^https?:\/\//i.test(normalized) ||
+    /^data:image\/(?:jpeg|png|webp|gif);base64,[a-z0-9+/=\s]+$/i.test(normalized)
+  );
 }
 
 function isDirectImageUrl(value) {
@@ -1944,6 +2467,102 @@ function renderInlineMarkdown(text) {
   return rendered.replace(/@@MD(\d+)@@/g, (_, index) => placeholders[Number(index)] || "");
 }
 
+function splitMarkdownTableRow(line) {
+  let normalized = String(line || "").trim();
+  if (!normalized.includes("|")) {
+    return null;
+  }
+  if (normalized.startsWith("|")) {
+    normalized = normalized.slice(1);
+  }
+  if (normalized.endsWith("|") && !normalized.endsWith("\\|")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  const cells = [];
+  let cell = "";
+  let escaped = false;
+  for (const character of normalized) {
+    if (escaped) {
+      cell += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      cell += character;
+      continue;
+    }
+    if (character === "|") {
+      cells.push(cell.trim().replace(/\\\|/g, "|"));
+      cell = "";
+      continue;
+    }
+    cell += character;
+  }
+  if (escaped) {
+    cell += "\\";
+  }
+  cells.push(cell.trim().replace(/\\\|/g, "|"));
+  return cells.length >= 2 ? cells : null;
+}
+
+function parseMarkdownTable(lines, startIndex) {
+  const headerCells = splitMarkdownTableRow(lines[startIndex]);
+  const dividerCells = splitMarkdownTableRow(lines[startIndex + 1]);
+  if (
+    !headerCells ||
+    !dividerCells ||
+    headerCells.length !== dividerCells.length ||
+    !dividerCells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s/g, "")))
+  ) {
+    return null;
+  }
+
+  const alignments = dividerCells.map((cell) => {
+    const normalized = cell.replace(/\s/g, "");
+    if (normalized.startsWith(":") && normalized.endsWith(":")) {
+      return "center";
+    }
+    return normalized.endsWith(":") ? "right" : "left";
+  });
+  const rows = [];
+  let nextIndex = startIndex + 2;
+  while (nextIndex < lines.length) {
+    const cells = splitMarkdownTableRow(lines[nextIndex]);
+    if (!cells || !lines[nextIndex].trim()) {
+      break;
+    }
+    rows.push(headerCells.map((_, columnIndex) => cells[columnIndex] || ""));
+    nextIndex += 1;
+  }
+
+  const header = headerCells
+    .map(
+      (cell, index) =>
+        `<th class="markdown-table-align-${alignments[index]}">${renderInlineMarkdown(cell)}</th>`
+    )
+    .join("");
+  const body = rows
+    .map(
+      (row) =>
+        `<tr>${row
+          .map(
+            (cell, index) =>
+              `<td class="markdown-table-align-${alignments[index]}">${renderInlineMarkdown(cell)}</td>`
+          )
+          .join("")}</tr>`
+    )
+    .join("");
+  return {
+    html:
+      `<div class="markdown-table-scroll" role="region" aria-label="Response table" tabindex="0">` +
+      `<table class="markdown-table"><thead><tr>${header}</tr></thead>` +
+      `<tbody>${body}</tbody></table></div>`,
+    endIndex: nextIndex - 1,
+  };
+}
+
 function renderMarkdown(markdown) {
   const normalized = String(markdown || "").replace(/\r\n?/g, "\n").trim();
   if (!normalized) {
@@ -1958,6 +2577,7 @@ function renderMarkdown(markdown) {
   let blockquote = [];
   let codeLines = [];
   let inCodeBlock = false;
+  let skipThroughIndex = -1;
 
   const flushParagraph = () => {
     if (paragraph.length === 0) {
@@ -2010,7 +2630,10 @@ function renderMarkdown(markdown) {
     codeLines = [];
   };
 
-  lines.forEach((line) => {
+  lines.forEach((line, lineIndex) => {
+    if (lineIndex <= skipThroughIndex) {
+      return;
+    }
     if (line.trim().startsWith("```")) {
       if (inCodeBlock) {
         flushCodeBlock();
@@ -2029,6 +2652,14 @@ function renderMarkdown(markdown) {
 
     if (!line.trim()) {
       flushTextBlocks();
+      return;
+    }
+
+    const table = parseMarkdownTable(lines, lineIndex);
+    if (table) {
+      flushTextBlocks();
+      blocks.push(table.html);
+      skipThroughIndex = table.endIndex;
       return;
     }
 
@@ -2122,33 +2753,75 @@ function renderMessage(message, options = {}) {
   const node = messageTemplate.content.firstElementChild.cloneNode(true);
   node.classList.add(normalized.role);
   node.querySelector(".message-meta").textContent = normalized.label;
-  node.querySelector(".message-body").innerHTML = renderMarkdown(normalized.body);
+  const messageBody = node.querySelector(".message-body");
+  messageBody.innerHTML = renderMarkdown(normalized.body);
+  if (normalized.images.length > 0) {
+    const imageList = document.createElement("div");
+    imageList.className = "message-image-list";
+    normalized.images.forEach((image) => {
+      const imageUrl = `data:${image.mime_type};base64,${image.content_base64}`;
+      const imageButton = document.createElement("button");
+      imageButton.type = "button";
+      imageButton.className = "message-image-button";
+      imageButton.title = `Expand ${image.filename}`;
+      const imageNode = document.createElement("img");
+      imageNode.src = imageUrl;
+      imageNode.alt = image.filename;
+      imageNode.loading = "lazy";
+      imageNode.decoding = "async";
+      imageButton.appendChild(imageNode);
+      imageButton.addEventListener("click", () => {
+        openImageLightbox(imageUrl, image.filename, imageButton);
+      });
+      imageList.appendChild(imageButton);
+    });
+    messageBody.prepend(imageList);
+  }
 
   const footer = node.querySelector(".message-footer");
 
-  if (normalized.generatedDocument) {
+  if (normalized.generatedDocuments.length > 0) {
     const generatedDocumentSection = document.createElement("div");
     generatedDocumentSection.className = "generated-document-section";
 
     const generatedDocumentLabel = document.createElement("div");
     generatedDocumentLabel.className = "generated-document-title";
-    generatedDocumentLabel.textContent = "Generated file:";
+    const sourceDocumentCount = normalized.generatedDocuments.filter(
+      (document) => document.document_kind === "source"
+    ).length;
+    generatedDocumentLabel.textContent =
+      sourceDocumentCount === normalized.generatedDocuments.length
+        ? sourceDocumentCount === 1
+          ? "Original source document:"
+          : "Original source documents:"
+        : normalized.generatedDocuments.length === 1
+          ? "Generated file:"
+          : "Generated files:";
     generatedDocumentSection.appendChild(generatedDocumentLabel);
 
-    const downloadButton = document.createElement("button");
-    downloadButton.type = "button";
-    downloadButton.className = "generated-document-button";
-    downloadButton.textContent = normalized.generatedDocument.title
-      ? `${normalized.generatedDocument.title} (${normalized.generatedDocument.filename})`
-      : normalized.generatedDocument.filename;
-    downloadButton.addEventListener("click", () => {
-      downloadBase64File(
-        normalized.generatedDocument.filename,
-        normalized.generatedDocument.mime_type,
-        normalized.generatedDocument.content_base64
-      );
+    normalized.generatedDocuments.forEach((generatedFile) => {
+      const downloadButton = document.createElement("button");
+      downloadButton.type = "button";
+      downloadButton.className = "generated-document-button";
+      downloadButton.textContent = generatedFile.title
+        ? `${generatedFile.title} (${generatedFile.filename})`
+        : generatedFile.filename;
+      downloadButton.addEventListener("click", () => {
+        downloadBase64File(
+          generatedFile.filename,
+          generatedFile.mime_type,
+          generatedFile.content_base64
+        );
+      });
+      generatedDocumentSection.appendChild(downloadButton);
     });
-    generatedDocumentSection.appendChild(downloadButton);
+    if (sourceDocumentCount > 0) {
+      const sourceNote = document.createElement("div");
+      sourceNote.className = "generated-document-title";
+      sourceNote.textContent =
+        "Attached to this private conversation; not added to the library.";
+      generatedDocumentSection.appendChild(sourceNote);
+    }
     footer.appendChild(generatedDocumentSection);
   }
 
@@ -2278,6 +2951,10 @@ function renderMessage(message, options = {}) {
 }
 
 function hideResponsePreparationIndicator() {
+  if (state.responseIndicatorTimer !== null) {
+    window.clearInterval(state.responseIndicatorTimer);
+    state.responseIndicatorTimer = null;
+  }
   if (!state.responseIndicatorNode) {
     return;
   }
@@ -2285,7 +2962,7 @@ function hideResponsePreparationIndicator() {
   state.responseIndicatorNode = null;
 }
 
-function showResponsePreparationIndicator() {
+function showResponsePreparationIndicator(statusText = "Preparing response") {
   hideResponsePreparationIndicator();
 
   const node = messageTemplate.content.firstElementChild.cloneNode(true);
@@ -2293,7 +2970,7 @@ function showResponsePreparationIndicator() {
   node.querySelector(".message-meta").textContent = "Assistant";
   node.querySelector(".message-body").innerHTML = `
     <div class="response-preparing" role="status" aria-live="polite" aria-label="Assistant is preparing a response">
-      <span class="response-preparing-text">Preparing response</span>
+      <span class="response-preparing-text"></span>
       <span class="response-preparing-dots" aria-hidden="true">
         <span></span>
         <span></span>
@@ -2302,6 +2979,15 @@ function showResponsePreparationIndicator() {
     </div>
   `;
   node.querySelector(".message-footer").remove();
+  const statusNode = node.querySelector(".response-preparing-text");
+  const startedAt = Date.now();
+  const updateStatus = () => {
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    statusNode.textContent =
+      elapsedSeconds > 0 ? `${statusText} · ${elapsedSeconds}s` : statusText;
+  };
+  updateStatus();
+  state.responseIndicatorTimer = window.setInterval(updateStatus, 1000);
 
   state.responseIndicatorNode = node;
   messageList.appendChild(node);
@@ -2327,12 +3013,25 @@ async function openCitationDocument(citation) {
 
 function setComposerState(isSending) {
   state.sending = isSending;
-  const composerBusy = isSending || state.memory.pairDeleteInFlightIndex !== null;
+  const authenticated =
+    Boolean(state.auth.user) && !state.auth.user.must_change_password;
+  const composerBusy =
+    !authenticated ||
+    isSending ||
+    state.memory.pairDeleteInFlightIndex !== null;
   sendButton.disabled = composerBusy;
   messageInput.disabled = composerBusy;
+  addChatImagesButton.disabled = composerBusy;
+  chatImageInput.disabled = composerBusy;
   sourceModeButton.disabled = composerBusy;
   reasoningModeButton.disabled = composerBusy;
   sendButton.textContent = isSending ? "Sending..." : "Send";
+  cancelResponseButton.classList.toggle("is-hidden", !isSending);
+  cancelResponseButton.disabled = !isSending;
+  if (!isSending) {
+    cancelResponseButton.textContent = "Cancel response";
+  }
+  renderChatImagePreviews();
   renderConversationSaveButton();
 }
 
@@ -3127,9 +3826,138 @@ function setDocumentGenerationStatus(message, tone = "neutral") {
 
 function setDeleteState(isDeleting) {
   state.library.deleteInFlight = isDeleting;
+  if (isDeleting) {
+    state.library.deleteProgress = {
+      phase: "starting",
+      percent: 0,
+      detail: "Starting deletion...",
+      startedAt: Date.now(),
+    };
+  } else {
+    state.library.deleteProgress = null;
+  }
   renderDeleteSelectionSummary();
+  renderDeleteProgressStatus();
   renderFolderTree();
   renderDocumentFileList();
+}
+
+function updateDeleteProgress(event) {
+  if (!state.library.deleteInFlight) {
+    return;
+  }
+  const existing = state.library.deleteProgress || { startedAt: Date.now() };
+  state.library.deleteProgress = {
+    phase: String(event.phase || existing.phase || "deleting"),
+    percent: Math.max(0, Math.min(100, Number(event.percent) || 0)),
+    detail: String(event.detail || existing.detail || "Updating the library..."),
+    startedAt: existing.startedAt || Date.now(),
+  };
+  renderDeleteSelectionSummary();
+  renderDeleteProgressStatus();
+}
+
+function renderDeleteProgressStatus() {
+  const progress = state.library.deleteProgress;
+  if (!state.library.deleteInFlight || !progress) {
+    deleteProgressPanel?.classList.add("is-hidden");
+    if (deleteProgressBar) {
+      deleteProgressBar.style.width = "0%";
+    }
+    if (deleteProgressTrack) {
+      deleteProgressTrack.setAttribute("aria-valuenow", "0");
+    }
+    return;
+  }
+  deleteProgressPanel?.classList.remove("is-hidden");
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((Date.now() - progress.startedAt) / 1000)
+  );
+  const percent = Math.round(progress.percent);
+  if (deleteProgressBar) {
+    deleteProgressBar.style.width = `${percent}%`;
+  }
+  if (deleteProgressTrack) {
+    deleteProgressTrack.setAttribute("aria-valuenow", String(percent));
+  }
+  if (deleteProgressLabel) {
+    deleteProgressLabel.textContent = `${progress.detail} ${percent}% · ${elapsedSeconds}s`;
+  }
+  setLibraryActionStatus(
+    `${progress.detail} ${percent}% · ${elapsedSeconds}s`
+  );
+}
+
+async function requestDocumentDeletion(documentIds) {
+  const response = await fetch("/api/documents/delete/stream", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      document_ids: documentIds,
+    }),
+  });
+  if (!response.ok) {
+    const payload = await parseJsonResponse(response);
+    throw new Error(payload?.detail || "Delete failed");
+  }
+
+  let resultPayload = null;
+  let bufferedText = "";
+  const handleLine = (line) => {
+    const normalized = String(line || "").trim();
+    if (!normalized) {
+      return;
+    }
+    let event;
+    try {
+      event = JSON.parse(normalized);
+    } catch (_error) {
+      throw new Error("The deletion progress stream returned invalid data.");
+    }
+    if (event.type === "progress") {
+      updateDeleteProgress(event);
+      return;
+    }
+    if (event.type === "error") {
+      throw new Error(event.detail || "Delete failed");
+    }
+    if (event.type === "result") {
+      resultPayload = event.payload || null;
+    }
+  };
+
+  const elapsedTimer = window.setInterval(renderDeleteProgressStatus, 1000);
+  try {
+    if (!response.body || typeof response.body.getReader !== "function") {
+      bufferedText = await response.text();
+      bufferedText.split(/\r?\n/).forEach(handleLine);
+    } else {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        bufferedText += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = bufferedText.split(/\r?\n/);
+        bufferedText = done ? "" : lines.pop() || "";
+        lines.forEach(handleLine);
+        if (done) {
+          if (bufferedText.trim()) {
+            handleLine(bufferedText);
+          }
+          break;
+        }
+      }
+    }
+  } finally {
+    window.clearInterval(elapsedTimer);
+  }
+  if (!resultPayload) {
+    throw new Error("The deletion completed without a result.");
+  }
+  return resultPayload;
 }
 
 function setLibraryActionStatus(message, tone = "neutral") {
@@ -3422,7 +4250,9 @@ function renderDeleteSelectionSummary() {
     selectedIds.length === 0 ||
     state.library.deleteInFlight ||
     !canMutateLibrary();
-  deleteSelectedButton.textContent = state.library.deleteInFlight ? "Deleting..." : "Delete selected";
+  deleteSelectedButton.textContent = state.library.deleteInFlight
+    ? `Deleting ${Math.round(state.library.deleteProgress?.percent || 0)}%`
+    : "Delete selected";
 }
 
 function toggleDeleteSelection(documentId) {
@@ -3437,44 +4267,6 @@ function toggleDeleteSelection(documentId) {
   renderDeleteSelectionSummary();
   renderFolderTree();
   renderDocumentFileList();
-}
-
-async function loadHealth({ force = false } = {}) {
-  if (!statusPill) {
-    return;
-  }
-
-  statusPill.classList.add("is-checking");
-  try {
-    const response = await fetch(`/api/health${force ? "?refresh_network=true" : ""}`);
-    const payload = await parseJsonResponse(response);
-    if (!response.ok) {
-      throw new Error("Health check failed");
-    }
-    const networkStatus = payload.openai_network || {};
-    const hasAlert = !payload.openai_configured || networkStatus.reachable !== true;
-    const detail = !payload.openai_configured
-      ? "OpenAI API key is missing."
-      : networkStatus.detail || "OpenAI network status is unavailable.";
-    const label = hasAlert
-      ? `Network alert. ${detail} Click to retry.`
-      : "OpenAI network access is available. Click to refresh.";
-
-    statusPill.classList.toggle("is-alert", hasAlert);
-    statusPill.classList.toggle("is-online", !hasAlert);
-    statusPill.setAttribute("aria-label", label);
-    statusPill.title = label;
-  } catch (error) {
-    statusPill.classList.add("is-alert");
-    statusPill.classList.remove("is-online");
-    statusPill.setAttribute(
-      "aria-label",
-      "Network status unavailable because the server health check failed. Click to retry."
-    );
-    statusPill.title = "Server health check failed. Click to retry.";
-  } finally {
-    statusPill.classList.remove("is-checking");
-  }
 }
 
 function closeSavedConversationContextMenu() {
@@ -3579,6 +4371,8 @@ function renderConversationSaveButton() {
   }
   const currentSaved = Boolean(getSavedConversationSummary(state.conversationId));
   saveConversationButton.disabled =
+    !state.auth.user ||
+    state.auth.user.must_change_password ||
     state.memory.saveInFlight ||
     Boolean(state.memory.renameInFlightId) ||
     state.memory.pairDeleteInFlightIndex !== null ||
@@ -3593,6 +4387,16 @@ function renderConversationSaveButton() {
 
 function renderSavedConversationList() {
   savedConversationList.innerHTML = "";
+
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    const signedOut = document.createElement("p");
+    signedOut.className = "saved-conversation-empty";
+    signedOut.textContent = state.auth.user
+      ? "Change your temporary password to access your chats."
+      : "Sign in to see your chats.";
+    savedConversationList.appendChild(signedOut);
+    return;
+  }
 
   if (state.memory.loadError) {
     const error = document.createElement("p");
@@ -3682,6 +4486,15 @@ function setConversationMemoryStatus(message, tone = "neutral") {
 }
 
 function updateConversationMemoryStatus() {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    setConversationMemoryStatus(
+      state.auth.user
+        ? "Change your temporary password to access conversations."
+        : "Sign in to access your private conversations."
+    );
+    return;
+  }
+
   if (state.memory.loadError) {
     setConversationMemoryStatus(`Recents unavailable: ${state.memory.loadError}`, "error");
     return;
@@ -3782,6 +4595,7 @@ function resetConversation(options = {}) {
     rememberActiveConversationScrollPosition();
   }
   state.conversationId = crypto.randomUUID();
+  clearChatImages();
   applyConversationPreferences(getDefaultConversationPreferences());
   rememberConversationPreferences(state.conversationId);
   renderConversationMessages([]);
@@ -3792,6 +4606,15 @@ function resetConversation(options = {}) {
 
 async function loadSavedConversations(options = {}) {
   const { openMostRecent = false } = options;
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    state.memory.conversations = [];
+    state.memory.loaded = true;
+    state.memory.loadError = null;
+    renderSavedConversationList();
+    renderConversationSaveButton();
+    updateConversationMemoryStatus();
+    return;
+  }
   const conversationIdWhenLoadingStarted = state.conversationId;
   let mostRecentConversation = null;
   try {
@@ -4299,6 +5122,11 @@ function renderFolderTree() {
   const createTreeDocumentRow = (docSummary, depth) => {
     const row = document.createElement("div");
     row.className = "folder-tree-document-row";
+    const includedViaFolder = state.library.draftContext.folderIds.some((folderId) =>
+      folderPathContainsFolder(folderId, docSummary.folder)
+    );
+    const isScopedDirectly = state.library.draftContext.documentIds.includes(docSummary.document_id);
+    row.classList.toggle("is-scoped", includedViaFolder || isScopedDirectly);
     if (state.library.previewDocumentId === docSummary.document_id) {
       row.classList.add("is-previewing");
     }
@@ -4359,10 +5187,6 @@ function renderFolderTree() {
     const scopeButton = document.createElement("button");
     scopeButton.type = "button";
     scopeButton.className = "scope-toggle-button";
-    const includedViaFolder = state.library.draftContext.folderIds.some((folderId) =>
-      folderPathContainsFolder(folderId, docSummary.folder)
-    );
-    const isScopedDirectly = state.library.draftContext.documentIds.includes(docSummary.document_id);
     scopeButton.classList.toggle("is-active", includedViaFolder || isScopedDirectly);
     scopeButton.disabled = includedViaFolder;
     scopeButton.textContent = includedViaFolder
@@ -4403,6 +5227,17 @@ function renderFolderTree() {
 
     const row = document.createElement("div");
     row.className = "folder-tree-row";
+    const isFolderScopedDirectly = Boolean(
+      node.folder && state.library.draftContext.folderIds.includes(node.folder.folder_id)
+    );
+    const isFolderScopedViaAncestor = Boolean(
+      node.folder &&
+        !isFolderScopedDirectly &&
+        state.library.draftContext.folderIds.some((folderId) =>
+          folderPathContainsFolder(folderId, node.folder.folder_id)
+        )
+    );
+    row.classList.toggle("is-scoped", isFolderScopedDirectly || isFolderScopedViaAncestor);
     row.classList.toggle("is-active", node.pathId === state.library.activeFolderId);
     if (node.pathId === null && state.library.activeFolderId === null) {
       row.classList.add("is-active");
@@ -4559,13 +5394,13 @@ function renderFolderTree() {
       const action = document.createElement("button");
       action.type = "button";
       action.className = "tree-action-button";
-      const isScoped = state.library.draftContext.folderIds.includes(node.folder.folder_id);
-      const isIncludedViaAncestor = !isScoped && state.library.draftContext.folderIds.some((folderId) =>
-        folderPathContainsFolder(folderId, node.folder.folder_id)
-      );
-      action.classList.toggle("is-active", isScoped || isIncludedViaAncestor);
-      action.disabled = isIncludedViaAncestor;
-      action.textContent = isScoped ? "Scoped" : isIncludedViaAncestor ? "Parent" : "Scope";
+      action.classList.toggle("is-active", isFolderScopedDirectly || isFolderScopedViaAncestor);
+      action.disabled = isFolderScopedViaAncestor;
+      action.textContent = isFolderScopedDirectly
+        ? "Scoped"
+        : isFolderScopedViaAncestor
+          ? "Parent"
+          : "Scope";
       action.addEventListener("click", (event) => {
         event.stopPropagation();
         toggleFolderScope(node.folder.folder_id);
@@ -4630,6 +5465,11 @@ function renderDocumentFileList() {
     const row = document.createElement("article");
     row.className = "document-file-row";
     row.dataset.documentId = docSummary.document_id;
+    const includedViaFolder = state.library.draftContext.folderIds.some((folderId) =>
+      folderPathContainsFolder(folderId, docSummary.folder)
+    );
+    const isScopedDirectly = state.library.draftContext.documentIds.includes(docSummary.document_id);
+    row.classList.toggle("is-scoped", includedViaFolder || isScopedDirectly);
     if (state.library.previewDocumentId === docSummary.document_id) {
       row.classList.add("is-previewing");
     }
@@ -4690,10 +5530,6 @@ function renderDocumentFileList() {
     const scopeButton = document.createElement("button");
     scopeButton.type = "button";
     scopeButton.className = "scope-toggle-button";
-    const includedViaFolder = state.library.draftContext.folderIds.some((folderId) =>
-      folderPathContainsFolder(folderId, docSummary.folder)
-    );
-    const isScopedDirectly = state.library.draftContext.documentIds.includes(docSummary.document_id);
     scopeButton.classList.toggle("is-active", includedViaFolder || isScopedDirectly);
     scopeButton.disabled = includedViaFolder;
     scopeButton.textContent = includedViaFolder
@@ -4898,20 +5734,7 @@ async function deleteSelectedDocuments() {
   setLibraryActionStatus("Deleting selected documents and refreshing the embedded library...");
 
   try {
-    const response = await fetch("/api/documents/delete", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        document_ids: selectedIds,
-      }),
-    });
-      const payload = await parseJsonResponse(response);
-      if (!response.ok) {
-        const detail = payload && payload.detail ? payload.detail : "Delete failed";
-        throw new Error(detail);
-      }
+    const payload = await requestDocumentDeletion(selectedIds);
 
     state.library.previewCache = {};
     if (selectedIds.includes(state.library.previewDocumentId)) {
@@ -5360,20 +6183,7 @@ async function deleteDocumentFromContext(documentId) {
   setLibraryActionStatus(`Deleting ${docSummary.title || documentId}...`);
 
   try {
-    const response = await fetch("/api/documents/delete", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        document_ids: [documentId],
-      }),
-    });
-    const payload = await parseJsonResponse(response);
-    if (!response.ok) {
-      const detail = payload && payload.detail ? payload.detail : "Delete failed";
-      throw new Error(detail);
-    }
+    const payload = await requestDocumentDeletion([documentId]);
 
     state.library.previewCache = {};
     if (state.library.previewDocumentId === documentId) {
@@ -5839,8 +6649,17 @@ async function generateDocumentFromContext(event) {
   }
 }
 
-async function sendMessage(message) {
-  if (!message || state.sending || state.memory.pairDeleteInFlightIndex !== null) {
+async function sendMessage(message, images = []) {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(userLoginBadge);
+    setConversationMemoryStatus("Sign in to start a private conversation.", "error");
+    return;
+  }
+  if (
+    (!message && images.length === 0) ||
+    state.sending ||
+    state.memory.pairDeleteInFlightIndex !== null
+  ) {
     return;
   }
 
@@ -5848,11 +6667,35 @@ async function sendMessage(message) {
     role: "user",
     label: "You",
     body: message,
+    images,
   });
 
+  const requestId = crypto.randomUUID();
+  const abortController = new AbortController();
+  state.activeChatRequestId = requestId;
+  state.activeChatAbortController = abortController;
   setComposerState(true);
-  showResponsePreparationIndicator();
+  const datasheetProducts = message.match(
+    /\b(?=[A-Z0-9-]*\d)[A-Z0-9]+(?:-[A-Z0-9]+)+\b/gi
+  );
+  const isDatasheetBatch =
+    /data\s*sheet/i.test(message) && new Set(datasheetProducts || []).size >= 2;
+  showResponsePreparationIndicator(
+    isDatasheetBatch
+      ? "Searching for product datasheets in parallel"
+      : "Preparing response"
+  );
   setConversationMemoryStatus("Preparing response. This chat will autosave after the reply.");
+  const clientTimeout = window.setTimeout(() => {
+    if (state.activeChatRequestId !== requestId) {
+      return;
+    }
+    void fetch(`/api/chat/${encodeURIComponent(requestId)}/cancel`, {
+      method: "POST",
+    }).finally(() => {
+      abortController.abort();
+    });
+  }, CHAT_CLIENT_TIMEOUT_MS);
 
   try {
     const response = await fetch("/api/chat", {
@@ -5860,9 +6703,16 @@ async function sendMessage(message) {
       headers: {
         "Content-Type": "application/json",
       },
+      signal: abortController.signal,
       body: JSON.stringify({
+        request_id: requestId,
         conversation_id: state.conversationId,
         message,
+        images: images.map((image) => ({
+          filename: image.filename,
+          mime_type: image.mime_type,
+          content_base64: image.content_base64,
+        })),
         source_mode: state.sourceMode,
         reasoning_mode: state.reasoningMode,
         context_filter: {
@@ -5887,28 +6737,144 @@ async function sendMessage(message) {
       citations: payload.citations || [],
       toolTrace: payload.tool_trace || [],
       generatedDocument: payload.generated_document || null,
+      generatedDocuments: payload.generated_documents || [],
     });
     await saveCurrentConversation({ silent: true });
   } catch (error) {
     hideResponsePreparationIndicator();
+    const wasManuallyCancelled = state.cancelledChatRequestId === requestId;
+    const failureMessage =
+      error && error.name === "AbortError"
+        ? wasManuallyCancelled
+          ? "Response cancelled by the user."
+          : "Response timed out and was cancelled."
+        : error.message;
     renderMessage({
       role: "system",
       label: "System",
-      body: `Request failed: ${error.message}`,
+      body:
+        failureMessage === "Response cancelled by the user."
+          ? "Response cancelled."
+          : `Request failed: ${failureMessage}`,
     });
     updateConversationMemoryStatus();
   } finally {
+    window.clearTimeout(clientTimeout);
+    if (state.activeChatRequestId === requestId) {
+      state.activeChatRequestId = null;
+      state.activeChatAbortController = null;
+    }
+    if (state.cancelledChatRequestId === requestId) {
+      state.cancelledChatRequestId = null;
+    }
     hideResponsePreparationIndicator();
     setComposerState(false);
     messageInput.focus();
   }
 }
 
+cancelResponseButton.addEventListener("click", async () => {
+  const requestId = state.activeChatRequestId;
+  if (!requestId || !state.sending) {
+    return;
+  }
+  cancelResponseButton.disabled = true;
+  cancelResponseButton.textContent = "Cancelling...";
+  setConversationMemoryStatus(
+    "Cancelling after the current external request finishes.",
+    "warning"
+  );
+  try {
+    const response = await fetch(`/api/chat/${encodeURIComponent(requestId)}/cancel`, {
+      method: "POST",
+    });
+    const payload = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(payload?.detail || "Could not cancel the response.");
+    }
+    if (!payload.cancelled) {
+      setConversationMemoryStatus(payload.message);
+      return;
+    }
+    state.cancelledChatRequestId = requestId;
+    state.activeChatAbortController?.abort();
+  } catch (error) {
+    cancelResponseButton.disabled = false;
+    cancelResponseButton.textContent = "Cancel response";
+    setConversationMemoryStatus(error.message, "error");
+  }
+});
+
+addChatImagesButton.addEventListener("click", () => {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(userLoginBadge);
+    return;
+  }
+  chatImageInput.click();
+});
+
+chatImageInput.addEventListener("change", async () => {
+  await addChatImageFiles(chatImageInput.files);
+  chatImageInput.value = "";
+});
+
+messageInput.addEventListener("paste", async (event) => {
+  const imageFiles = Array.from(event.clipboardData?.files || []).filter((file) =>
+    file.type.startsWith("image/")
+  );
+  if (!imageFiles.length) {
+    return;
+  }
+  event.preventDefault();
+  await addChatImageFiles(imageFiles);
+});
+
+composerForm.addEventListener("dragenter", (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+    event.preventDefault();
+    composerForm.classList.add("is-image-dragover");
+  }
+});
+
+composerForm.addEventListener("dragover", (event) => {
+  if (Array.from(event.dataTransfer?.types || []).includes("Files")) {
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    composerForm.classList.add("is-image-dragover");
+  }
+});
+
+composerForm.addEventListener("dragleave", (event) => {
+  if (!composerForm.contains(event.relatedTarget)) {
+    composerForm.classList.remove("is-image-dragover");
+  }
+});
+
+composerForm.addEventListener("drop", async (event) => {
+  composerForm.classList.remove("is-image-dragover");
+  const imageFiles = Array.from(event.dataTransfer?.files || []).filter((file) =>
+    file.type.startsWith("image/")
+  );
+  if (!imageFiles.length) {
+    return;
+  }
+  event.preventDefault();
+  await addChatImageFiles(imageFiles);
+});
+
 composerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = messageInput.value.trim();
+  const images = state.chatImages.map((image) => ({ ...image }));
+  if (!message && images.length === 0) {
+    setConversationMemoryStatus("Enter a message or attach an image.", "error");
+    return;
+  }
   messageInput.value = "";
-  await sendMessage(message);
+  clearChatImages();
+  await sendMessage(message, images);
 });
 
 messageInput.addEventListener("keydown", (event) => {
@@ -6014,6 +6980,10 @@ if (librarySyncAllButton) {
 }
 
 newConversationButton.addEventListener("click", () => {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(userLoginBadge);
+    return;
+  }
   closeSavedConversationContextMenu();
   resetConversation();
   messageInput.focus();
@@ -6108,6 +7078,103 @@ reasoningModeButton.addEventListener("click", () => {
 openLibraryButton.addEventListener("click", () => {
   closeSavedConversationContextMenu();
   openDocumentBrowser();
+});
+
+userLoginBadge.addEventListener("click", () => {
+  openUserManagement(userLoginBadge);
+});
+
+closeUserManagementButton.addEventListener("click", () => {
+  closeUserManagement();
+});
+
+userManagementBackdrop.addEventListener("click", () => {
+  closeUserManagement();
+});
+
+showSignInButton.addEventListener("click", () => {
+  setAuthView("signin");
+});
+
+showSignUpButton.addEventListener("click", () => {
+  setAuthView("signup");
+});
+
+signInForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const succeeded = await submitAuth(
+    "/api/auth/login",
+    {
+      username: signInUsernameInput.value.trim(),
+      password: signInPasswordInput.value,
+    },
+    signInSubmitButton,
+    "Signing in..."
+  );
+  if (succeeded) {
+    signInPasswordInput.value = "";
+  }
+});
+
+signUpForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (signUpPasswordInput.value !== signUpPasswordConfirmInput.value) {
+    setUserManagementStatus("Passwords do not match.", "error");
+    signUpPasswordConfirmInput.focus();
+    return;
+  }
+  const succeeded = await submitAuth(
+    "/api/auth/signup",
+    {
+      display_name: signUpDisplayNameInput.value.trim(),
+      username: signUpUsernameInput.value.trim(),
+      password: signUpPasswordInput.value,
+    },
+    signUpSubmitButton,
+    "Creating account..."
+  );
+  if (succeeded) {
+    signUpForm.reset();
+  }
+});
+
+showChangePasswordButton.addEventListener("click", () => {
+  setAuthView("change");
+});
+
+cancelChangePasswordButton.addEventListener("click", () => {
+  setAuthView("account");
+});
+
+changePasswordForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (newPasswordInput.value !== newPasswordConfirmInput.value) {
+    setUserManagementStatus("New passwords do not match.", "error");
+    newPasswordConfirmInput.focus();
+    return;
+  }
+  const succeeded = await submitAuth(
+    "/api/auth/change-password",
+    {
+      current_password: currentPasswordInput.value,
+      new_password: newPasswordInput.value,
+    },
+    changePasswordSubmitButton,
+    "Saving..."
+  );
+  if (succeeded) {
+    changePasswordForm.reset();
+    state.auth.view = "account";
+    renderAuth();
+  }
+});
+
+signOutButton.addEventListener("click", () => {
+  void signOut();
+});
+
+forcedSignOutButton.addEventListener("click", () => {
+  void signOut();
 });
 
 closeBrowserButton.addEventListener("click", () => {
@@ -6347,6 +7414,11 @@ document.addEventListener("keydown", (event) => {
     closeSavedConversationContextMenu();
     return;
   }
+  if (event.key === "Escape" && !userManagementModal.classList.contains("is-hidden")) {
+    event.preventDefault();
+    closeUserManagement();
+    return;
+  }
 
   if (event.key === "Escape" && !documentBrowser.classList.contains("is-hidden")) {
     if (synchronizedPathsMenu && !synchronizedPathsMenu.classList.contains("is-hidden")) {
@@ -6412,9 +7484,11 @@ window.addEventListener("resize", () => {
 
 window.addEventListener("pagehide", () => {
   rememberActiveConversationScrollPosition();
-  if (healthRefreshTimer !== null) {
-    window.clearInterval(healthRefreshTimer);
-  }
+  stopUiSessionHeartbeat();
+});
+
+window.addEventListener("pageshow", () => {
+  startUiSessionHeartbeat();
 });
 
 documentBrowser.addEventListener("scroll", () => {
@@ -6437,12 +7511,6 @@ setUploadStatus("Choose files or a local folder, including Dropbox-synced folder
 renderSavedConversationList();
 renderConversationSaveButton();
 resetConversation({ rememberCurrentScroll: false });
-void loadHealth();
-statusPill?.addEventListener("click", () => {
-  void loadHealth({ force: true });
-});
-healthRefreshTimer = window.setInterval(() => {
-  void loadHealth();
-}, 30000);
-void loadSavedConversations({ openMostRecent: true });
+startUiSessionHeartbeat();
+void initializeAuthenticatedWorkspace();
 void loadDocumentLibrary();

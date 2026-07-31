@@ -22,6 +22,12 @@ class BroaderModeTests(unittest.TestCase):
             openai_maximum_reasoning_effort="max",
             openai_text_verbosity="medium",
             openai_store_responses=False,
+            chat_request_timeout_seconds=120,
+            chat_max_tool_rounds=5,
+            openai_request_timeout_seconds=60,
+            source_download_timeout_seconds=30,
+            source_download_max_attempts=1,
+            source_download_max_bytes=20 * 1024 * 1024,
         )
         self.agent = BusinessKnowledgeAgent(self.settings, Mock(), Mock())
         self.agent._client = Mock()
@@ -42,7 +48,10 @@ class BroaderModeTests(unittest.TestCase):
         self.agent._run_response([], "broader", RetrievalContext())
         request = self.agent._client.responses.create.call_args.kwargs
 
-        self.assertEqual([tool["type"] for tool in request["tools"]], ["web_search"])
+        self.assertEqual(
+            [tool.get("name", tool["type"]) for tool in request["tools"]],
+            ["web_search", "retrieve_source_pdf"],
+        )
         self.assertIn("No internal document scope is selected", request["instructions"])
 
     def test_global_context_can_use_internal_tools_after_explicit_scope_selection(self) -> None:

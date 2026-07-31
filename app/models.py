@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 SourceMode = Literal["internal", "broader"]
 ReasoningMode = Literal["standard", "maximum"]
+UserRole = Literal["admin", "library_manager", "member"]
 UploadSimilarityPolicy = Literal["warn", "replace", "ignore"]
-GeneratedDocumentFormat = Literal["txt", "docx", "xlsx"]
+GeneratedDocumentFormat = Literal["txt", "docx", "pdf", "xlsx"]
 
 
 class ContextFilter(BaseModel):
@@ -18,12 +21,38 @@ class ContextFilter(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
 
 
+class ChatImage(BaseModel):
+    filename: str = Field(min_length=1, max_length=180)
+    mime_type: Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
+    content_base64: str = Field(min_length=1, max_length=12_000_000)
+
+    @model_validator(mode="after")
+    def validate_binary_content(self) -> "ChatImage":
+        try:
+            decoded = base64.b64decode(self.content_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("Image content is not valid base64.") from exc
+        if not decoded:
+            raise ValueError("Image content is empty.")
+        if len(decoded) > 8 * 1024 * 1024:
+            raise ValueError("Each image must be 8 MB or smaller.")
+        return self
+
+
 class ChatRequest(BaseModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=160)
     conversation_id: str | None = None
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(default="", max_length=8000)
+    images: list[ChatImage] = Field(default_factory=list, max_length=5)
     source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
+
+    @model_validator(mode="after")
+    def require_message_or_image(self) -> "ChatRequest":
+        if not self.message.strip() and not self.images:
+            raise ValueError("Enter a message or attach an image.")
+        return self
 
 
 class Citation(BaseModel):
@@ -45,15 +74,19 @@ class GeneratedChatDocument(BaseModel):
     mime_type: str
     content_base64: str
     title: str | None = None
+    document_kind: Literal["generated", "source"] = "generated"
+    source_url: str | None = None
 
 
 class ConversationMessage(BaseModel):
     role: Literal["assistant", "user", "system"]
     label: str
     body: str
+    images: list[ChatImage] = Field(default_factory=list, max_length=5)
     citations: list[Citation] = Field(default_factory=list)
     tool_trace: list[ToolTrace] = Field(default_factory=list)
     generated_document: GeneratedChatDocument | None = None
+    generated_documents: list[GeneratedChatDocument] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -62,6 +95,7 @@ class ChatResponse(BaseModel):
     citations: list[Citation]
     tool_trace: list[ToolTrace]
     generated_document: GeneratedChatDocument | None = None
+    generated_documents: list[GeneratedChatDocument] = Field(default_factory=list)
     source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode
     context_filter: ContextFilter
@@ -69,6 +103,7 @@ class ChatResponse(BaseModel):
 
 class SavedConversationSummary(BaseModel):
     conversation_id: str
+    owner_user_id: str
     title: str | None = None
     title_is_custom: bool = False
     summary: str = "Saved conversation"
@@ -128,6 +163,39 @@ class ConversationPairDeleteResponse(BaseModel):
     deleted: bool
     message: str
     conversation: SavedConversationDetail
+
+
+class UserSummary(BaseModel):
+    user_id: str
+    username: str
+    display_name: str
+    role: UserRole
+    is_active: bool = True
+    must_change_password: bool = False
+    created_at: str
+    updated_at: str
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=40)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AuthSignupRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=40)
+    display_name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=10, max_length=256)
+
+
+class AuthChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=10, max_length=256)
+
+
+class AuthSessionResponse(BaseModel):
+    authenticated: bool
+    user: UserSummary | None = None
+    message: str
 
 
 class FolderSummary(BaseModel):
@@ -420,6 +488,7 @@ class FolderRenameResponse(BaseModel):
 @dataclass
 class SessionState:
     conversation_id: str
+    owner_user_id: str
     history: list[Any] = field(default_factory=list)
     transcript: list[ConversationMessage] = field(default_factory=list)
     source_mode: SourceMode = "broader"

@@ -11,9 +11,10 @@ import json
 import logging
 import posixpath
 import re
+import sqlite3
 import threading
 import uuid
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -22,9 +23,11 @@ from pypdf.errors import PyPdfError
 
 from app.config import Settings
 from app.ocr import OcrProvider, create_ocr_provider
+from app.pdf_vision import PdfVisionAnalyzer, PdfVisionPage
 from app.datastore import (
     DocumentRecord,
     build_effective_document_tags,
+    delete_documents_from_semantic_index,
     iter_folder_lineage,
     load_folder_registry,
     load_json_documents,
@@ -187,6 +190,7 @@ class DocumentIngestionService:
         self._settings = settings
         self._lock = threading.Lock()
         self._ocr_provider: OcrProvider | None = None
+        self._pdf_vision_analyzer: PdfVisionAnalyzer | None = None
 
     def ingest_upload(
         self,
@@ -399,9 +403,19 @@ class DocumentIngestionService:
             failed_uploads=failed_uploads,
         )
 
-    def delete_documents(self, *, document_ids: list[str]) -> DeleteOutcome:
+    def delete_documents(
+        self,
+        *,
+        document_ids: list[str],
+        progress_callback: Callable[[str, int, str], None] | None = None,
+    ) -> DeleteOutcome:
         self._require_local_mutation_backend("Delete")
 
+        def report(phase: str, percent: int, detail: str) -> None:
+            if progress_callback is not None:
+                progress_callback(phase, percent, detail)
+
+        report("validating", 5, "Validating selected documents...")
         normalized_document_ids = []
         seen_ids: set[str] = set()
         for item in document_ids:
@@ -417,6 +431,7 @@ class DocumentIngestionService:
             raise ValueError("Select at least one document to delete.")
 
         with self._lock:
+            report("loading_library", 12, "Loading the current library...")
             existing_documents = load_json_documents(self._settings.docstore_json_path)
             existing_ids = {document.document_id for document in existing_documents}
             missing_ids = [document_id for document_id in normalized_document_ids if document_id not in existing_ids]
@@ -433,17 +448,24 @@ class DocumentIngestionService:
                 for document in existing_documents
                 if document.document_id not in delete_id_set
             ]
+            report("writing_library", 22, "Updating the library document file...")
             semantic_index_rebuilt = self._persist_documents(
                 documents=remaining_documents,
                 backup_payload=backup_payload,
+                semantic_sync_mode="delete_only",
+                deleted_document_ids=normalized_document_ids,
+                progress_callback=progress_callback,
             )
 
         total_deleted = len(normalized_document_ids)
         noun = "document" if total_deleted == 1 else "documents"
         if semantic_index_rebuilt:
             message = f"Deleted {total_deleted} {noun} and rebuilt embeddings."
+        elif self._settings.docstore_backend == "semantic":
+            message = f"Deleted {total_deleted} {noun} and updated the semantic index."
         else:
             message = f"Deleted {total_deleted} {noun}."
+        report("complete", 100, message)
 
         return DeleteOutcome(
             deleted_document_ids=normalized_document_ids,
@@ -873,6 +895,8 @@ class DocumentIngestionService:
                     documents=remaining_documents,
                     backup_payload=self._backup_payload(),
                     folder_ids=updated_registered_folder_ids,
+                    semantic_sync_mode="delete_only",
+                    deleted_document_ids=deleted_document_ids,
                 )
             else:
                 self._persist_folder_registry(
@@ -1240,8 +1264,10 @@ class DocumentIngestionService:
                 f"{maximum_pages} pages."
             )
 
-        page_text_by_number: dict[int, str] = {}
+        native_text_by_number: dict[int, str] = {}
         pages_requiring_ocr: list[int] = []
+        pages_with_embedded_images: list[int] = []
+        pages_with_vector_graphics: list[int] = []
         minimum_native_chars = max(
             0,
             int(self._pdf_ocr_setting("pdf_ocr_min_native_text_chars", 40)),
@@ -1254,34 +1280,76 @@ class DocumentIngestionService:
                     f"Could not extract text from page {page_number} of `{filename}`."
                 ) from exc
 
-            page_text_by_number[page_number] = page_text
+            native_text_by_number[page_number] = page_text
             native_character_count = len(WHITESPACE_RE.sub("", page_text))
             if native_character_count < minimum_native_chars:
                 pages_requiring_ocr.append(page_number)
+            if self._page_has_embedded_images(page):
+                pages_with_embedded_images.append(page_number)
+            elif self._page_has_vector_graphics(page):
+                pages_with_vector_graphics.append(page_number)
 
-        if pages_requiring_ocr:
-            if not bool(self._pdf_ocr_setting("pdf_ocr_enabled", True)):
-                if not any(page_text_by_number.values()):
-                    raise ValueError(
-                        f"Uploaded PDF `{filename}` contains no extractable text. "
-                        "Image-only PDFs require OCR, but PDF OCR is disabled."
-                    )
-            else:
-                logger.warning(
-                    "PDF OCR required: filename=%s; page_count=%d; pages=%s.",
-                    filename,
-                    page_count,
-                    ",".join(str(page_number) for page_number in pages_requiring_ocr),
-                )
-                ocr_text_by_number = self._ocr_pdf_pages(
+        extra_image_ocr_pages: list[int] = []
+        if bool(self._pdf_ocr_setting("pdf_image_ocr_enabled", True)):
+            maximum_image_ocr_pages = max(
+                0,
+                int(self._pdf_ocr_setting("pdf_image_ocr_max_pages", 100)),
+            )
+            extra_image_ocr_pages = [
+                page_number
+                for page_number in pages_with_embedded_images
+                if page_number not in pages_requiring_ocr
+            ][:maximum_image_ocr_pages]
+        ocr_page_numbers = sorted(
+            set(pages_requiring_ocr).union(extra_image_ocr_pages)
+        )
+        ocr_text_by_number: dict[int, str] = {}
+        if ocr_page_numbers and bool(self._pdf_ocr_setting("pdf_ocr_enabled", True)):
+            logger.warning(
+                "PDF OCR required: filename=%s; page_count=%d; pages=%s; mixed_image_pages=%s.",
+                filename,
+                page_count,
+                ",".join(str(page_number) for page_number in ocr_page_numbers),
+                ",".join(str(page_number) for page_number in extra_image_ocr_pages) or "none",
+            )
+            ocr_text_by_number = self._ocr_pdf_pages(
+                filename=filename,
+                content_bytes=content_bytes,
+                page_numbers=ocr_page_numbers,
+            )
+
+        vision_text_by_number: dict[int, str] = {}
+        vision_page_numbers = self._select_pdf_vision_pages(
+            pages_requiring_ocr=pages_requiring_ocr,
+            pages_with_embedded_images=pages_with_embedded_images,
+            pages_with_vector_graphics=pages_with_vector_graphics,
+        )
+        if vision_page_numbers:
+            try:
+                vision_text_by_number = self._analyze_pdf_visual_pages(
                     filename=filename,
                     content_bytes=content_bytes,
-                    page_numbers=pages_requiring_ocr,
+                    page_numbers=vision_page_numbers,
+                    native_text_by_number=native_text_by_number,
+                    ocr_text_by_number=ocr_text_by_number,
                 )
-                for page_number, ocr_text in ocr_text_by_number.items():
-                    if ocr_text.strip():
-                        page_text_by_number[page_number] = ocr_text.strip()
+            except Exception as exc:
+                logger.exception(
+                    "PDF vision analysis failed; continuing with extracted text: "
+                    "filename=%s; pages=%s; error=%s",
+                    filename,
+                    ",".join(str(page_number) for page_number in vision_page_numbers),
+                    exc,
+                )
 
+        page_text_by_number = {
+            page_number: self._merge_pdf_page_content(
+                native_text=native_text_by_number.get(page_number, ""),
+                ocr_text=ocr_text_by_number.get(page_number, ""),
+                vision_text=vision_text_by_number.get(page_number, ""),
+            )
+            for page_number in range(1, page_count + 1)
+        }
         sections = [
             f"Page {page_number}\n{page_text}"
             for page_number, page_text in page_text_by_number.items()
@@ -1290,18 +1358,207 @@ class DocumentIngestionService:
 
         combined = "\n\n".join(sections).strip()
         if not combined:
+            if not bool(self._pdf_ocr_setting("pdf_ocr_enabled", True)):
+                raise ValueError(
+                    f"Uploaded PDF `{filename}` contains no extractable text. "
+                    "Image-only PDFs require OCR, but PDF OCR is disabled."
+                )
             raise ValueError(
                 f"Uploaded PDF `{filename}` contains no extractable text. "
-                "OCR ran but did not recognize any text."
+                "OCR ran but did not recognize any text, and image interpretation "
+                "did not identify searchable visual information."
             )
         logger.info(
-            "PDF ingestion completed: filename=%s; page_count=%d; ocr_page_count=%d; extracted_character_count=%d.",
+            "PDF ingestion completed: filename=%s; page_count=%d; ocr_page_count=%d; "
+            "vision_page_count=%d; extracted_character_count=%d.",
             filename,
             page_count,
-            len(pages_requiring_ocr),
+            len(ocr_page_numbers),
+            len(vision_text_by_number),
             len(combined),
         )
         return combined
+
+    def _select_pdf_vision_pages(
+        self,
+        *,
+        pages_requiring_ocr: list[int],
+        pages_with_embedded_images: list[int],
+        pages_with_vector_graphics: list[int],
+    ) -> list[int]:
+        if not bool(self._pdf_ocr_setting("pdf_vision_enabled", False)):
+            return []
+        if not str(self._pdf_ocr_setting("openai_api_key", "") or "").strip():
+            logger.warning("PDF vision skipped because OPENAI_API_KEY is not configured.")
+            return []
+
+        maximum_pages = max(
+            0,
+            int(self._pdf_ocr_setting("pdf_vision_max_pages", 12)),
+        )
+        if maximum_pages == 0:
+            return []
+        priority_order = [
+            *pages_with_embedded_images,
+            *pages_requiring_ocr,
+            *pages_with_vector_graphics,
+        ]
+        selected: list[int] = []
+        seen: set[int] = set()
+        for page_number in priority_order:
+            if page_number in seen:
+                continue
+            seen.add(page_number)
+            selected.append(page_number)
+            if len(selected) >= maximum_pages:
+                break
+        return sorted(selected)
+
+    def _analyze_pdf_visual_pages(
+        self,
+        *,
+        filename: str,
+        content_bytes: bytes,
+        page_numbers: list[int],
+        native_text_by_number: dict[int, str],
+        ocr_text_by_number: dict[int, str],
+    ) -> dict[int, str]:
+        try:
+            import pypdfium2 as pdfium
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF image interpretation requires the `pypdfium2` package."
+            ) from exc
+        from PIL import Image
+
+        dpi = min(
+            300,
+            max(72, int(self._pdf_ocr_setting("pdf_vision_dpi", 144))),
+        )
+        maximum_dimension = min(
+            3000,
+            max(512, int(self._pdf_ocr_setting("pdf_vision_max_dimension", 1800))),
+        )
+        logger.info(
+            "PDF vision started: filename=%s; pages=%s; model=%s; dpi=%d.",
+            filename,
+            ",".join(str(page_number) for page_number in page_numbers),
+            self._pdf_ocr_setting("pdf_vision_model", "gpt-5.6-luna"),
+            dpi,
+        )
+        try:
+            document = pdfium.PdfDocument(content_bytes)
+        except Exception as exc:
+            raise ValueError(
+                f"Uploaded file `{filename}` could not be rendered for image interpretation."
+            ) from exc
+
+        vision_pages: list[PdfVisionPage] = []
+        try:
+            for page_number in page_numbers:
+                page = None
+                bitmap = None
+                image = None
+                try:
+                    page = document[page_number - 1]
+                    bitmap = page.render(scale=dpi / 72)
+                    image = bitmap.to_pil().convert("RGB")
+                    image.thumbnail(
+                        (maximum_dimension, maximum_dimension),
+                        Image.Resampling.LANCZOS,
+                    )
+                    image_buffer = io.BytesIO()
+                    image.save(
+                        image_buffer,
+                        format="JPEG",
+                        quality=82,
+                        optimize=True,
+                    )
+                    vision_pages.append(
+                        PdfVisionPage(
+                            page_number=page_number,
+                            image_bytes=image_buffer.getvalue(),
+                            native_text=native_text_by_number.get(page_number, ""),
+                            ocr_text=ocr_text_by_number.get(page_number, ""),
+                        )
+                    )
+                finally:
+                    if image is not None:
+                        image.close()
+                    if bitmap is not None:
+                        bitmap.close()
+                    if page is not None:
+                        page.close()
+        finally:
+            document.close()
+
+        results = self._get_pdf_vision_analyzer().analyze_pages(vision_pages)
+        logger.info(
+            "PDF vision completed: filename=%s; analyzed_page_count=%d; "
+            "described_page_count=%d.",
+            filename,
+            len(vision_pages),
+            len(results),
+        )
+        return results
+
+    def _page_has_embedded_images(self, page: Any) -> bool:
+        try:
+            return len(page.images) > 0
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+
+    def _page_has_vector_graphics(self, page: Any) -> bool:
+        try:
+            contents = page.get_contents()
+            content_bytes = contents.get_data() if contents is not None else b""
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        graphics_operators = re.findall(
+            rb"(?:^|\s)(?:m|l|c|v|y|re|S|s|f|f\*|B|B\*)(?=\s|$)",
+            content_bytes,
+        )
+        return len(graphics_operators) >= 16
+
+    def _merge_pdf_page_content(
+        self,
+        *,
+        native_text: str,
+        ocr_text: str,
+        vision_text: str,
+    ) -> str:
+        native = str(native_text or "").strip()
+        ocr = str(ocr_text or "").strip()
+        vision = str(vision_text or "").strip()
+        sections = [native] if native else []
+        novel_ocr = self._deduplicate_pdf_ocr_text(native, ocr)
+        if novel_ocr:
+            if native:
+                sections.append(f"Image text (OCR)\n{novel_ocr}")
+            else:
+                sections.append(novel_ocr)
+        if vision:
+            sections.append(f"Visual content\n{vision}")
+        return "\n\n".join(section for section in sections if section).strip()
+
+    def _deduplicate_pdf_ocr_text(self, native_text: str, ocr_text: str) -> str:
+        native_lines = {
+            self._normalize_pdf_dedupe_line(line)
+            for line in str(native_text or "").splitlines()
+            if self._normalize_pdf_dedupe_line(line)
+        }
+        novel_lines: list[str] = []
+        seen_lines = set(native_lines)
+        for line in str(ocr_text or "").splitlines():
+            normalized = self._normalize_pdf_dedupe_line(line)
+            if not normalized or normalized in seen_lines:
+                continue
+            seen_lines.add(normalized)
+            novel_lines.append(line.strip())
+        return "\n".join(novel_lines).strip()
+
+    def _normalize_pdf_dedupe_line(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
     def _ocr_pdf_pages(
         self,
@@ -1388,6 +1645,13 @@ class DocumentIngestionService:
             provider = create_ocr_provider(self._settings)
             self._ocr_provider = provider
         return provider
+
+    def _get_pdf_vision_analyzer(self) -> PdfVisionAnalyzer:
+        analyzer = getattr(self, "_pdf_vision_analyzer", None)
+        if analyzer is None:
+            analyzer = PdfVisionAnalyzer(self._settings)
+            self._pdf_vision_analyzer = analyzer
+        return analyzer
 
     def _pdf_ocr_setting(self, name: str, default: Any) -> Any:
         settings = getattr(self, "_settings", None)
@@ -2287,6 +2551,8 @@ class DocumentIngestionService:
         backup_payload: LibraryBackupPayload,
         folder_ids: list[str] | None = None,
         semantic_sync_mode: str = "full",
+        deleted_document_ids: list[str] | None = None,
+        progress_callback: Callable[[str, int, str], None] | None = None,
     ) -> bool:
         try:
             write_json_documents(self._settings.docstore_json_path, documents)
@@ -2295,7 +2561,33 @@ class DocumentIngestionService:
 
             semantic_index_rebuilt = False
             if self._settings.docstore_backend == "semantic":
-                if semantic_sync_mode == "metadata_only":
+                if semantic_sync_mode == "delete_only" and deleted_document_ids:
+                    try:
+                        sync_result = delete_documents_from_semantic_index(
+                            index_path=self._settings.semantic_index_path,
+                            document_ids=deleted_document_ids,
+                            progress_callback=progress_callback,
+                        )
+                    except (RuntimeError, sqlite3.DatabaseError):
+                        if progress_callback is not None:
+                            progress_callback(
+                                "rebuilding_index",
+                                35,
+                                "Index requires repair; rebuilding semantic data...",
+                            )
+                        sync_result = sync_semantic_index(
+                            source_path=self._settings.docstore_json_path,
+                            index_path=self._settings.semantic_index_path,
+                            openai_api_key=self._settings.openai_api_key,
+                            search_embedding_model=self._settings.semantic_search_embedding_model,
+                            search_embedding_dimensions=self._settings.semantic_search_embedding_dimensions,
+                            answer_embedding_model=self._settings.semantic_answer_embedding_model,
+                            answer_embedding_dimensions=self._settings.semantic_answer_embedding_dimensions,
+                            chunk_size_words=self._settings.semantic_chunk_size_words,
+                            chunk_overlap_words=self._settings.semantic_chunk_overlap_words,
+                            batch_size=self._settings.semantic_embedding_batch_size,
+                        )
+                elif semantic_sync_mode == "metadata_only":
                     try:
                         sync_result = sync_semantic_metadata_only(
                             index_path=self._settings.semantic_index_path,

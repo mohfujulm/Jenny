@@ -66,18 +66,19 @@
       <main class="chat-stage">
         <div class="chat-mode-controls" aria-label="Chat settings">
           <button
-            id="statusPill"
-            class="network-status-button is-checking"
+            id="userLoginBadge"
+            class="user-login-badge"
             type="button"
-            aria-label="Checking OpenAI network access"
-            title="Checking OpenAI network access"
+            aria-label="Sign in or open your account"
+            title="Sign in or open your account"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M5 12.6a10.8 10.8 0 0 1 14 0"></path>
-              <path d="M8.3 16a5.8 5.8 0 0 1 7.4 0"></path>
-              <path d="M11.2 19.2a1.2 1.2 0 0 1 1.6 0"></path>
-            </svg>
-            <span class="network-status-alert-mark" aria-hidden="true">!</span>
+            <span class="user-login-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <circle cx="12" cy="8" r="3.5"></circle>
+                <path d="M5.5 19c.8-3.5 3-5.4 6.5-5.4s5.7 1.9 6.5 5.4"></path>
+              </svg>
+            </span>
+            <span id="userLoginLabel">Sign in</span>
           </button>
           <button
             id="sourceModeButton"
@@ -112,6 +113,14 @@
 
         <form id="composerForm" class="composer">
           <label class="composer-label" for="messageInput">Ask the agent</label>
+          <input
+            id="chatImageInput"
+            class="visually-hidden"
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif"
+            multiple
+          >
+          <div id="chatImagePreviewList" class="chat-image-preview-list is-hidden" aria-live="polite"></div>
           <textarea
             id="messageInput"
             name="message"
@@ -119,8 +128,19 @@
             placeholder="Ask about policies, documents, onboarding, billing, support, or general questions."
           ></textarea>
           <div class="composer-row">
-            <p id="composerNote" class="composer-note">Internal facts should come from the datastore, not memory.</p>
-            <button id="sendButton" class="primary-button" type="submit">Send</button>
+            <div class="composer-support">
+              <button id="addChatImagesButton" class="composer-attach-button" type="button" title="Attach images">
+                <span aria-hidden="true">＋</span>
+                Images
+              </button>
+              <p id="composerNote" class="composer-note">Internal facts should come from the datastore, not memory.</p>
+            </div>
+            <div class="composer-actions">
+              <button id="cancelResponseButton" class="ghost-button is-hidden" type="button">
+                Cancel response
+              </button>
+              <button id="sendButton" class="primary-button" type="submit">Send</button>
+            </div>
           </div>
         </form>
       </main>
@@ -133,6 +153,118 @@
       <button id="savedConversationDeleteButton" class="saved-conversation-context-menu-item saved-conversation-context-menu-item-danger" type="button">
         Delete conversation
       </button>
+    </div>
+
+    <div id="userManagementModal" class="user-management-modal is-hidden" aria-hidden="true">
+      <div
+        id="userManagementBackdrop"
+        class="user-management-backdrop"
+        aria-hidden="true"
+      ></div>
+      <section
+        class="user-management-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="userManagementTitle"
+      >
+        <header class="user-management-header">
+          <div>
+            <p id="authEyebrow" class="eyebrow">Your account</p>
+            <h2 id="userManagementTitle">Welcome to Ask Jenny</h2>
+            <p id="authDescription" class="mode-description">Sign in to continue, or create a personal account.</p>
+          </div>
+          <button
+            id="closeUserManagementButton"
+            class="explorer-icon-button"
+            type="button"
+            aria-label="Close account"
+            title="Close"
+          >
+            &times;
+          </button>
+        </header>
+        <div class="user-management-body">
+          <section id="authSignedOutView" class="auth-view">
+            <div class="auth-tabs" role="tablist" aria-label="Account access">
+              <button id="showSignInButton" class="auth-tab is-active" type="button" role="tab" aria-selected="true">
+                Sign in
+              </button>
+              <button id="showSignUpButton" class="auth-tab" type="button" role="tab" aria-selected="false">
+                Sign up
+              </button>
+            </div>
+            <form id="signInForm" class="auth-form">
+              <label class="field" for="signInUsernameInput">
+                <span class="field-label">Username</span>
+                <input id="signInUsernameInput" type="text" minlength="3" maxlength="40" autocomplete="username" autocapitalize="none" required>
+              </label>
+              <label class="field" for="signInPasswordInput">
+                <span class="field-label">Password</span>
+                <input id="signInPasswordInput" type="password" maxlength="256" autocomplete="current-password" required>
+              </label>
+              <button id="signInSubmitButton" class="primary-button" type="submit">Sign in</button>
+            </form>
+            <form id="signUpForm" class="auth-form is-hidden">
+              <label class="field" for="signUpDisplayNameInput">
+                <span class="field-label">Display name</span>
+                <input id="signUpDisplayNameInput" type="text" maxlength="120" autocomplete="name" required>
+              </label>
+              <label class="field" for="signUpUsernameInput">
+                <span class="field-label">Username</span>
+                <input id="signUpUsernameInput" type="text" minlength="3" maxlength="40" autocomplete="username" autocapitalize="none" required>
+              </label>
+              <label class="field" for="signUpPasswordInput">
+                <span class="field-label">Password</span>
+                <input id="signUpPasswordInput" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+              </label>
+              <label class="field" for="signUpPasswordConfirmInput">
+                <span class="field-label">Confirm password</span>
+                <input id="signUpPasswordConfirmInput" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+              </label>
+              <p class="auth-password-guidance">Use at least 10 characters with uppercase, lowercase, and a number.</p>
+              <button id="signUpSubmitButton" class="primary-button" type="submit">Create account</button>
+            </form>
+          </section>
+          <section id="authAccountView" class="auth-view is-hidden">
+            <div class="account-card">
+              <span id="accountAvatar" class="account-avatar" aria-hidden="true">A</span>
+              <div>
+                <h3 id="accountDisplayName">Administrator</h3>
+                <p id="accountUsername"></p>
+              </div>
+            </div>
+            <div class="account-detail-row">
+              <span>Account type</span>
+              <strong id="accountRole">Member</strong>
+            </div>
+            <button id="showChangePasswordButton" class="secondary-button" type="button">Change password</button>
+            <button id="signOutButton" class="ghost-button auth-sign-out-button" type="button">Sign out</button>
+          </section>
+          <form id="changePasswordForm" class="auth-view auth-form is-hidden">
+            <div class="user-management-section-head">
+              <p class="eyebrow">Security</p>
+              <h3 id="changePasswordTitle">Change your password</h3>
+            </div>
+            <p id="changePasswordGuidance" class="auth-password-guidance">Enter your current password and choose a new one.</p>
+            <label class="field" for="currentPasswordInput">
+              <span class="field-label">Current password</span>
+              <input id="currentPasswordInput" type="password" maxlength="256" autocomplete="current-password" required>
+            </label>
+            <label class="field" for="newPasswordInput">
+              <span class="field-label">New password</span>
+              <input id="newPasswordInput" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <label class="field" for="newPasswordConfirmInput">
+              <span class="field-label">Confirm new password</span>
+              <input id="newPasswordConfirmInput" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <button id="changePasswordSubmitButton" class="primary-button" type="submit">Save new password</button>
+            <button id="cancelChangePasswordButton" class="ghost-button" type="button">Back to account</button>
+            <button id="forcedSignOutButton" class="ghost-button auth-sign-out-button is-hidden" type="button">Sign out instead</button>
+          </form>
+          <p id="userManagementStatus" class="user-management-status" aria-live="polite"></p>
+        </div>
+      </section>
     </div>
 
     <template id="messageTemplate">
@@ -216,6 +348,20 @@
                 </p>
               </div>
               <div id="deleteChipList" class="context-chip-list"></div>
+              <div id="deleteProgressPanel" class="delete-progress is-hidden" aria-live="polite">
+                <div
+                  id="deleteProgressTrack"
+                  class="delete-progress-track"
+                  role="progressbar"
+                  aria-label="Document deletion progress"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="0"
+                >
+                  <span id="deleteProgressBar" class="delete-progress-bar"></span>
+                </div>
+                <span id="deleteProgressLabel" class="delete-progress-label">Starting deletion...</span>
+              </div>
               <button id="deleteSelectedButton" class="danger-button library-danger-button" type="button">
                 Delete selected
               </button>

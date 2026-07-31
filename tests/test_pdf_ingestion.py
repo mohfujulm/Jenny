@@ -8,8 +8,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
 
 from app.ingestion import DocumentIngestionService, PDF_UPLOAD_SUFFIXES
 from app.watch_folders import BINARY_WATCH_SUFFIXES
@@ -53,6 +56,27 @@ def build_pdf_pages(
 
 def build_pdf(text: str | None = None, password: str | None = None) -> bytes:
     return build_pdf_pages([text], password=password)
+
+
+def build_mixed_text_and_image_pdf() -> bytes:
+    image_buffer = BytesIO()
+    Image.new("RGB", (320, 140), color=(228, 239, 235)).save(
+        image_buffer,
+        format="PNG",
+    )
+    image_buffer.seek(0)
+    output = BytesIO()
+    pdf = canvas.Canvas(output, pagesize=(612, 792))
+    pdf.drawString(72, 720, "Native page text with enough characters")
+    pdf.drawImage(
+        ImageReader(image_buffer),
+        72,
+        500,
+        width=320,
+        height=140,
+    )
+    pdf.save()
+    return output.getvalue()
 
 
 class PdfIngestionTests(unittest.TestCase):
@@ -114,6 +138,43 @@ class PdfIngestionTests(unittest.TestCase):
             "Page 1\nNative field report\n\nPage 2\nScanned appendix",
         )
         self.assertEqual(ocr_pages.call_args.kwargs["page_numbers"], [2])
+
+    def test_mixed_content_page_adds_image_ocr_and_visual_interpretation(self) -> None:
+        self.service._settings.openai_api_key = "test-key"
+        self.service._settings.pdf_image_ocr_enabled = True
+        self.service._settings.pdf_image_ocr_max_pages = 100
+        self.service._settings.pdf_vision_enabled = True
+        self.service._settings.pdf_vision_max_pages = 12
+        with (
+            patch.object(
+                self.service,
+                "_ocr_pdf_pages",
+                return_value={
+                    1: (
+                        "Native page text with enough characters\n"
+                        "CAMERA LABEL 42"
+                    )
+                },
+            ) as ocr_pages,
+            patch.object(
+                self.service,
+                "_analyze_pdf_visual_pages",
+                return_value={
+                    1: "Diagram shows Camera 42 connected to the recording server."
+                },
+            ) as vision_pages,
+        ):
+            extracted = self.service._extract_pdf_document_text(
+                filename="mixed-visual.pdf",
+                content_bytes=build_mixed_text_and_image_pdf(),
+            )
+
+        self.assertIn("Native page text with enough characters", extracted)
+        self.assertEqual(extracted.count("Native page text with enough characters"), 1)
+        self.assertIn("Image text (OCR)\nCAMERA LABEL 42", extracted)
+        self.assertIn("Visual content\nDiagram shows Camera 42", extracted)
+        self.assertEqual(ocr_pages.call_args.kwargs["page_numbers"], [1])
+        self.assertEqual(vision_pages.call_args.kwargs["page_numbers"], [1])
 
     def test_rejects_image_only_pdf_when_ocr_is_disabled(self) -> None:
         self.service._settings.pdf_ocr_enabled = False
