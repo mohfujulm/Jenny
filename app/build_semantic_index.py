@@ -1,3 +1,9 @@
+"""Command-line entry point for rebuilding the local semantic search index.
+
+This maintenance utility reads the canonical JSON corpus and replaces the
+derived SQLite chunk/embedding database using the same settings as the server.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +14,7 @@ from app.datastore import rebuild_semantic_index
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define paths and chunking controls, seeded from application settings."""
     settings = get_settings()
     parser = argparse.ArgumentParser(description="Build the local semantic document index.")
     parser.add_argument(
@@ -70,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run the rebuild and print its document/chunk summary."""
     parser = build_parser()
     args = parser.parse_args()
     settings = get_settings()

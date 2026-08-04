@@ -1,3 +1,10 @@
+"""Perform the lightweight network probe reported by the health endpoint.
+
+The probe intentionally treats an HTTP authentication error as reachable: the
+question here is whether the OpenAI host can be contacted, not whether the
+application's API key is valid.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,6 +17,7 @@ OPENAI_NETWORK_CHECK_URL = "https://api.openai.com/v1/models"
 
 
 def check_openai_network_access(*, timeout_seconds: float = 5.0) -> dict[str, object]:
+    """Return a serializable reachability result, latency, and diagnostic detail."""
     checked_at = datetime.now(timezone.utc).isoformat()
     started_at = perf_counter()
     request = Request(

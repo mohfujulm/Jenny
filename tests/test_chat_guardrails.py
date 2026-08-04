@@ -1,3 +1,5 @@
+"""Exercise chat cancellation, deadlines, citation filtering, and safety limits."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +8,16 @@ import threading
 import unittest
 from unittest.mock import Mock
 
-from app.models import Citation, ContextFilter, GeneratedChatDocument, SessionState
+from app.datastore import DocumentRecord, RetrievalContext
+from app.document_generator import GeneratedDocumentResult
+from app.models import (
+    ChatImage,
+    Citation,
+    ContextFilter,
+    ConversationMessage,
+    GeneratedChatDocument,
+    SessionState,
+)
 from app.openai_agent import (
     BusinessKnowledgeAgent,
     ChatCancelledError,
@@ -110,6 +121,225 @@ class ChatGuardrailTests(unittest.TestCase):
         timeout = self.agent._client.responses.create.call_args.kwargs["timeout"]
         self.assertGreater(timeout, 0)
         self.assertLessEqual(timeout, 60)
+
+    def test_generated_document_reuses_loaded_sources_and_skips_final_model_round(self) -> None:
+        document = DocumentRecord(
+            document_id="DOC-1",
+            title="Project Notes",
+            category="project",
+            folder="Projects/Test",
+            tags=["project"],
+            summary="Project source material.",
+            text="Relevant source text.",
+        )
+        self.agent._document_store.get_document.return_value = document
+        generator = Mock()
+        generator.generate_document.return_value = GeneratedDocumentResult(
+            filename="project-summary.pdf",
+            mime_type="application/pdf",
+            content_bytes=b"%PDF-1.4\n%%EOF",
+            message="Generated project-summary.pdf from 1 internal source.",
+            citations=[
+                Citation(
+                    document_id="DOC-1",
+                    title="Project Notes",
+                    category="project",
+                )
+            ],
+        )
+        self.agent._document_generator = generator
+        self.agent._settings.chat_max_tool_rounds = 5
+        get_document_call = SimpleNamespace(
+            type="function_call",
+            name="get_document",
+            arguments=json.dumps({"document_id": "DOC-1"}),
+            call_id="get-1",
+        )
+        generate_call = SimpleNamespace(
+            type="function_call",
+            name="generate_context_document",
+            arguments=json.dumps(
+                {
+                    "title": "Project Summary",
+                    "output_format": "pdf",
+                    "instructions": "Create a concise project summary.",
+                }
+            ),
+            call_id="generate-1",
+        )
+        self.agent._client.responses.create.side_effect = [
+            SimpleNamespace(output=[get_document_call], output_text=""),
+            SimpleNamespace(output=[generate_call], output_text=""),
+        ]
+
+        response = self.agent.chat(
+            "conversation-1",
+            "user-1",
+            "Create a downloadable project summary from DOC-1.",
+            [],
+            "internal",
+            ContextFilter(),
+            request_id="request-generation",
+        )
+
+        self.assertEqual(self.agent._client.responses.create.call_count, 2)
+        self.assertEqual(response.generated_document.filename, "project-summary.pdf")
+        self.assertEqual(
+            response.assistant_message,
+            "Generated project-summary.pdf from 1 internal source.",
+        )
+        self.assertEqual(
+            generator.generate_document.call_args.kwargs["supporting_document_ids"],
+            ["DOC-1"],
+        )
+
+    def test_explicit_file_request_bypasses_chat_planning_rounds(self) -> None:
+        generator = Mock()
+        generator.generate_document.return_value = GeneratedDocumentResult(
+            filename="direct-summary.pdf",
+            mime_type="application/pdf",
+            content_bytes=b"%PDF-1.4\n%%EOF",
+            message="Generated direct-summary.pdf.",
+            citations=[],
+        )
+        self.agent._document_generator = generator
+
+        response = self.agent.chat(
+            "conversation-1",
+            "user-1",
+            "Create a PDF summary of the selected project files.",
+            [],
+            "internal",
+            ContextFilter(),
+            request_id="request-direct-generation",
+        )
+
+        self.agent._client.responses.create.assert_not_called()
+        generator.generate_document.assert_called_once()
+        self.assertEqual(response.generated_document.filename, "direct-summary.pdf")
+        self.assertEqual(response.assistant_message, "Generated direct-summary.pdf.")
+
+    def test_history_compaction_keeps_only_recent_bounded_turns(self) -> None:
+        self.agent._settings.chat_history_max_messages = 4
+        self.agent._settings.chat_history_max_chars = 2_500
+        session = SessionState(
+            conversation_id="conversation-history",
+            owner_user_id="user-1",
+            history=[{"role": "user", "content": "stale tool history"}],
+            transcript=[
+                ConversationMessage(
+                    role="user" if index % 2 == 0 else "assistant",
+                    label="You" if index % 2 == 0 else "Assistant",
+                    body=f"message-{index}-" + ("x" * 990),
+                )
+                for index in range(8)
+            ],
+        )
+
+        self.agent._compact_session_history(session)
+
+        self.assertEqual(len(session.history), 2)
+        self.assertTrue(session.history[0]["content"].startswith("message-6-"))
+        self.assertTrue(session.history[1]["content"].startswith("message-7-"))
+
+    def test_internal_search_results_and_full_document_payloads_are_bounded(self) -> None:
+        self.agent._document_store.search_documents.return_value = []
+        self.agent._execute_tool(
+            "search_documents",
+            {"query": "project", "limit": 8},
+            "internal",
+            RetrievalContext(),
+        )
+        self.assertEqual(
+            self.agent._document_store.search_documents.call_args.kwargs["limit"],
+            4,
+        )
+
+        self.agent._document_store.get_document.return_value = DocumentRecord(
+            document_id="DOC-LONG",
+            title="Long document",
+            category="project",
+            folder="Projects/Test",
+            tags=[],
+            summary="Long source.",
+            text="x" * 20_000,
+        )
+        payload, _citations, _summary, _generated = self.agent._execute_tool(
+            "get_document",
+            {"document_id": "DOC-LONG"},
+            "internal",
+            RetrievalContext(),
+        )
+        self.assertEqual(len(payload["text"]), 6_000)
+
+    def test_current_turn_reasoning_cannot_trigger_an_over_budget_second_call(self) -> None:
+        self.agent._settings.chat_max_tool_rounds = 3
+        self.agent._request_budget.maximum_units = 30_000
+        oversized_reasoning = SimpleNamespace(
+            type="reasoning",
+            encrypted_content="r" * 40_000,
+        )
+        tool_call = SimpleNamespace(
+            type="function_call",
+            name="retrieve_source_pdf",
+            arguments=json.dumps(
+                {
+                    "url": "https://manufacturer.example/datasheet.pdf",
+                    "filename": "datasheet.pdf",
+                    "title": "Datasheet",
+                }
+            ),
+            call_id="budget-call",
+        )
+        self.agent._client.responses.create.return_value = SimpleNamespace(
+            output=[oversized_reasoning, tool_call],
+            output_text="",
+        )
+        self.agent._source_retriever = Mock()
+        self.agent._source_retriever.retrieve_pdf.return_value = RetrievedSourceDocument(
+            filename="datasheet.pdf",
+            mime_type="application/pdf",
+            content_bytes=b"%PDF-1.4\nsource\n%%EOF",
+            source_url="https://manufacturer.example/datasheet.pdf",
+        )
+
+        response = self.agent.chat(
+            "conversation-1",
+            "user-1",
+            "Find the original datasheet.",
+            [],
+            "broader",
+            ContextFilter(),
+            request_id="request-budget",
+        )
+
+        self.assertEqual(self.agent._client.responses.create.call_count, 1)
+        self.assertIn("input budget", response.assistant_message)
+
+    def test_current_images_use_bounded_high_detail(self) -> None:
+        self.agent._client.responses.create.return_value = SimpleNamespace(
+            output=[],
+            output_text="Done.",
+        )
+        self.agent.chat(
+            "conversation-1",
+            "user-1",
+            "Review this image.",
+            [
+                ChatImage(
+                    filename="panel.png",
+                    mime_type="image/png",
+                    content_base64="aGVsbG8=",
+                )
+            ],
+            "broader",
+            ContextFilter(),
+            request_id="request-image-detail",
+        )
+
+        request = self.agent._client.responses.create.call_args.kwargs
+        image_item = request["input"][-1]["content"][1]
+        self.assertEqual(image_item["detail"], "high")
 
     def test_cancel_request_signals_the_active_chat(self) -> None:
         entered = threading.Event()

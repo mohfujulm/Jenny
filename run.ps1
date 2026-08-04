@@ -1,3 +1,8 @@
+<#
+Starts the local FastAPI server from the project's virtual environment.
+Before launch it reports optional OCR readiness and distinguishes network
+reachability from API authentication (HTTP 401 still proves the host is reachable).
+#>
 param(
     [string]$HostAddress = "127.0.0.1",
     [int]$Port = 8000,
@@ -55,6 +60,7 @@ if ($openAiNetworkAvailable) {
     Write-Warning "OpenAI API network access is blocked. The app will start in degraded mode, but new document embeddings and AI responses may fail. $openAiNetworkDetail"
 }
 
+# Build arguments as an array so host/path values are passed without shell re-parsing.
 $args = @(
     "-m",
     "uvicorn",
@@ -65,6 +71,7 @@ $args = @(
     $Port
 )
 
+# Reload is opt-in because broad Windows filesystem watching is comparatively slow.
 $enableReload = $Reload -and (-not $NoReload)
 
 if ($enableReload) {

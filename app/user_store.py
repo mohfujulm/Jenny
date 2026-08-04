@@ -1,3 +1,10 @@
+"""SQLite-backed local accounts, password verification, and login sessions.
+
+Passwords use salted PBKDF2-HMAC and constant-time comparison.  Raw browser
+session tokens are returned once; only SHA-256 hashes are stored, limiting the
+value of a copied database.
+"""
+
 from __future__ import annotations
 
 from contextlib import closing
@@ -19,14 +26,17 @@ _PASSWORD_ITERATIONS = 600_000
 
 
 class DuplicateUsernameError(ValueError):
+    """Raised when normalized account names would collide."""
     pass
 
 
 class InvalidCredentialsError(ValueError):
+    """Raised without revealing whether the username or password was wrong."""
     pass
 
 
 class UserStore:
+    """Manage users and expiring authentication sessions in one SQLite file."""
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
         self._lock = threading.Lock()

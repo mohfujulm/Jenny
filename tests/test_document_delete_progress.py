@@ -1,3 +1,5 @@
+"""Verify streamed deletion emits parseable progress and a terminal result."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""Verify watched imports combine inferred source tags with protected folder tags."""
+
 from __future__ import annotations
 
 from dataclasses import replace

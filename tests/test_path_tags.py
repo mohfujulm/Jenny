@@ -1,3 +1,5 @@
+"""Document the supported project-path conventions through tag inference tests."""
+
 from __future__ import annotations
 
 import unittest

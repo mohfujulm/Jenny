@@ -1,3 +1,5 @@
+"""Test page batching and structured response parsing for PDF vision analysis."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

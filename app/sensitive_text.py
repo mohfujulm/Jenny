@@ -1,3 +1,10 @@
+"""Redact credential-like lines before text reaches model-facing workflows.
+
+This is a deliberately conservative, line-oriented safety net.  It does not try
+to recognize or retain the secret value; the entire suspicious line is replaced
+so labels, usernames, and tokens cannot leak through partial matching.
+"""
+
 from __future__ import annotations
 
 import re
@@ -18,6 +25,7 @@ REDACTION_NOTICE = "[REDACTED sensitive credential-like content]"
 
 
 def redact_sensitive_text(value: str | None) -> str | None:
+    """Replace lines containing credential vocabulary with a fixed notice."""
     if value is None:
         return None
 

@@ -1,3 +1,8 @@
+<#
+Compiles the small WinForms bootstrapper into AskJenny.exe using the .NET
+Framework compiler already included with Windows. The executable only locates
+and launches tray.ps1; the Python application remains the actual server.
+#>
 param(
     [string]$OutputPath
 )
@@ -16,6 +21,7 @@ $manifestPath = Join-Path $root "launcher\AskJenny.manifest"
 $iconPath = Join-Path $root "app\static\jenny.ico"
 $outputDirectory = Split-Path -Parent $OutputPath
 
+# Prefer the 64-bit compiler but retain compatibility with 32-bit installations.
 $compilerCandidates = @(
     "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
     "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
@@ -38,6 +44,7 @@ if (-not (Test-Path $outputDirectory)) {
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 }
 
+# winexe suppresses a console window; the manifest and icon provide desktop metadata.
 $compilerArguments = @(
     "/nologo",
     "/target:winexe",

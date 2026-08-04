@@ -1,3 +1,8 @@
+<#
+Runs Ask Jenny as a single-instance Windows notification-area application.
+It owns the uvicorn child process, polls health for menu state, opens the browser,
+and writes child stdout/stderr to predictable log files for troubleshooting.
+#>
 param(
     [string]$HostAddress = "127.0.0.1",
     [int]$Port = 8000,
@@ -18,6 +23,7 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# A named per-user mutex prevents two tray icons from managing competing servers.
 $trayMutex = New-Object System.Threading.Mutex($false, "Local\AskJennyServerTray")
 $mutexAcquired = $false
 try {
@@ -46,6 +52,7 @@ if (-not $mutexAcquired) {
     exit 0
 }
 
+# Script scope lets event-handler closures share process and shutdown state.
 $script:serverProcess = $null
 $script:lastStatusKey = ""
 $script:exiting = $false
@@ -90,6 +97,7 @@ $exitItem.Text = "Exit tray and stop server"
 [void]$menu.Items.Add($exitItem)
 $notifyIcon.ContextMenuStrip = $menu
 
+# Health and presentation helpers --------------------------------------------
 function Get-ServerHealth {
     try {
         return Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 4
@@ -184,6 +192,7 @@ function Update-TrayStatus {
         -ServerRunning $true
 }
 
+# Server lifecycle ------------------------------------------------------------
 function Start-Server {
     if ($null -ne (Get-ServerHealth)) {
         Update-TrayStatus

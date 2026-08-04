@@ -135,10 +135,42 @@ ownership metadata are assigned to the default Administrator during migration.
 New conversations are attached to the signed-in user, and list, load, update,
 and delete operations are filtered by that owner.
 
+Saved conversations use normalized SQLite storage at
+`app/data/saved_conversations.sqlite`. Metadata and messages are updated in
+atomic WAL transactions, while images and generated files are stored as raw,
+content-addressed BLOBs so identical legacy/current document fields occupy one
+copy. Unchanged message prefixes are not rewritten when only conversation
+settings or titles change. On the first startup after upgrading, the legacy
+`saved_conversations.json` file is imported transactionally and left untouched
+as a recovery copy. Configure the active database with
+`SAVED_CONVERSATIONS_DATABASE_PATH`; `SAVED_CONVERSATIONS_PATH` identifies only
+the legacy migration source.
+
 Users can attach up to five JPEG, PNG, WebP, or GIF images to a chat message by
 choosing files, pasting from the clipboard, or dragging images onto the
 composer. Each image can be up to 8 MB. Attachments are sent as multimodal model
-input and saved with the private conversation.
+input and saved with the private conversation. On later turns, the image name
+and the assistant's prior interpretation remain in context, but the large
+base64 image payload is not resent automatically.
+
+Saved conversations keep their complete private transcript. Model requests use
+a bounded recent window plus up to four locally ranked excerpts from older
+turns, allowing earlier decisions and preferences to be recalled without an
+extra OpenAI completion or embedding call. Historical excerpts are selected
+only from the authenticated user's current conversation, are treated as quoted
+content rather than system instructions, and are capped at 4,000 characters by
+default. Configure or disable this behavior with `CHAT_MEMORY_ENABLED`,
+`CHAT_MEMORY_MAX_CHARS`, and `CHAT_MEMORY_MAX_TURNS`; recent verbatim context is
+controlled by `CHAT_HISTORY_MAX_MESSAGES` and `CHAT_HISTORY_MAX_CHARS`.
+Before every OpenAI model round, the complete request—including system
+instructions, enabled tool schemas, recent history, locally recalled memory,
+current-turn tool output, encrypted reasoning continuation, and bounded-detail
+images—is checked against a deterministic input envelope. Optional old turns
+are removed first; required current-turn tool/reasoning state is never silently
+truncated. If required state alone exceeds the envelope, the turn stops before
+incurring another API call. Configure the envelope with
+`CHAT_MAX_INPUT_BUDGET` and the per-image charge with
+`CHAT_IMAGE_BUDGET_UNITS`.
 
 In **Context: Global**, the agent can find an official datasheet, manual,
 specification, or other public PDF and attach the original file to the private
@@ -152,7 +184,7 @@ needed.
 Internet-enabled chat requests are bounded so a failed search or slow download
 cannot run indefinitely. By default, a response has a 120-second overall budget,
 an individual OpenAI call has a 60-second ceiling with automatic retries
-disabled, the agent can perform at most five model/tool rounds, and it can make
+disabled, the agent can perform at most three model/tool rounds, and it can make
 only one source-PDF download attempt. The composer exposes **Cancel response**
 while a request is active. Configure these limits with
 `CHAT_REQUEST_TIMEOUT_SECONDS`, `OPENAI_REQUEST_TIMEOUT_SECONDS`,
@@ -165,16 +197,14 @@ separate private-conversation downloads, duplicates are removed, and a failure
 for one product does not discard the other successful files. The response
 shows an elapsed-time retrieval status while the batch is active.
 
-The application creates a default Administrator account on first startup:
-
-- Username: `admin`
-- Temporary password: `Administrator!1`
-
-The Administrator must replace that temporary password after the first sign-in.
-Override the bootstrap values with `DEFAULT_ADMIN_USERNAME`,
-`DEFAULT_ADMIN_DISPLAY_NAME`, and `DEFAULT_ADMIN_PASSWORD`. Account records and
-server-side session tokens are stored in `app/data/application.sqlite` by
-default; change the location with `APPLICATION_DATABASE_PATH`.
+Administrator bootstrap credentials are deployment secrets and are
+intentionally omitted from this repository's documentation and example
+configuration. Set `DEFAULT_ADMIN_USERNAME`, `DEFAULT_ADMIN_DISPLAY_NAME`, and
+`DEFAULT_ADMIN_PASSWORD` only in the untracked private `.env` before deployment,
+and change the bootstrap password after first sign-in. Never publish or commit
+the resulting login. Account records and server-side session tokens are stored
+in `app/data/application.sqlite` by default; change the location with
+`APPLICATION_DATABASE_PATH`.
 
 ## Portable Docker setup
 

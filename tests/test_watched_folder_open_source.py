@@ -1,3 +1,5 @@
+"""Check source-folder opening behavior and its platform/error boundaries."""
+
 from __future__ import annotations
 
 from pathlib import Path

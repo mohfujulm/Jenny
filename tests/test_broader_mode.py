@@ -1,3 +1,5 @@
+"""Verify broader mode enables public knowledge while disabling internal scope."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -79,12 +81,19 @@ class BroaderModeTests(unittest.TestCase):
         self.agent._run_response([], "internal", context, "standard")
         standard_request = self.agent._client.responses.create.call_args.kwargs
         self.assertEqual(standard_request["model"], "gpt-5.6-luna")
-        self.assertEqual(standard_request["reasoning"], {"effort": "medium"})
+        self.assertEqual(
+            standard_request["reasoning"],
+            {"effort": "medium", "context": "current_turn"},
+        )
 
         self.agent._run_response([], "internal", context, "maximum")
         maximum_request = self.agent._client.responses.create.call_args.kwargs
         self.assertEqual(maximum_request["model"], "gpt-5.6-terra")
-        self.assertEqual(maximum_request["reasoning"], {"effort": "max"})
+        self.assertEqual(
+            maximum_request["reasoning"],
+            {"effort": "max", "context": "current_turn"},
+        )
+        self.assertEqual(maximum_request["max_output_tokens"], 3000)
 
     def test_document_generation_uses_the_selected_reasoning_profile(self) -> None:
         generator = ContextDocumentGenerator(self.settings, Mock())
@@ -109,6 +118,7 @@ class BroaderModeTests(unittest.TestCase):
         )
         self.assertEqual(request["model"], "gpt-5.6-terra")
         self.assertEqual(request["reasoning"], {"effort": "max"})
+        self.assertEqual(request["max_output_tokens"], 6000)
 
     def test_collects_web_search_trace_and_url_citation(self) -> None:
         output_items = [

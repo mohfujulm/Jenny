@@ -1,3 +1,5 @@
+"""Verify generated PDF layout retains headings, tables, sources, and pagination."""
+
 from __future__ import annotations
 
 import io
@@ -7,6 +9,7 @@ from unittest.mock import Mock
 
 from pypdf import PdfReader
 
+from app.datastore import DocumentRecord
 from app.document_generator import ContextDocumentGenerator, PDF_MIME_TYPE
 from app.models import Citation, ContextFilter, DocumentGenerationRequest
 from app.openai_agent import TOOLS
@@ -82,6 +85,35 @@ class PdfDocumentGenerationTests(unittest.TestCase):
         self.assertEqual(result.mime_type, "application/pdf")
         self.assertTrue(result.content_bytes.startswith(b"%PDF-"))
         self.assertEqual(result.citations, [citation])
+
+    def test_generate_document_reuses_chat_selected_documents_without_searching_again(self) -> None:
+        document_store = Mock()
+        document_store.get_document.return_value = DocumentRecord(
+            document_id="DOC-1",
+            title="Project Notes",
+            category="project",
+            folder="Projects/Test",
+            tags=[],
+            summary="Selected by the chat.",
+            text="Supporting text.",
+        )
+        generator = ContextDocumentGenerator(SimpleNamespace(), document_store)
+        generator._collect_supporting_documents = Mock()
+        generator._generate_text_document = Mock(return_value="Generated summary.")
+
+        result = generator.generate_document(
+            instructions="Create a project summary.",
+            title="Project Summary",
+            output_format="pdf",
+            source_mode="internal",
+            reasoning_mode="standard",
+            context_filter=ContextFilter(),
+            supporting_document_ids=["DOC-1", "DOC-1"],
+        )
+
+        self.assertEqual(result.filename, "project-summary.pdf")
+        document_store.get_document.assert_called_once()
+        generator._collect_supporting_documents.assert_not_called()
 
 
 if __name__ == "__main__":

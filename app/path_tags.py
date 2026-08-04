@@ -1,3 +1,10 @@
+"""Infer searchable metadata from structured watched-folder paths.
+
+The supported path convention encodes project number, project name, site, and
+working owner in directory names.  Inference is best-effort: unfamiliar paths
+produce fewer tags rather than blocking file synchronization.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

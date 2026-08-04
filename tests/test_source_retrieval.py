@@ -1,3 +1,5 @@
+"""Test public-PDF retrieval, redirects, limits, and SSRF protections."""
+
 from __future__ import annotations
 
 import socket

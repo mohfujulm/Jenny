@@ -16,6 +16,10 @@ using System.Windows.Forms;
 [assembly: AssemblyFileVersion("1.0.0.0")]
 [assembly: AssemblyInformationalVersion("1.0.0")]
 
+/// <summary>
+/// Minimal Windows bootstrapper that starts the PowerShell tray host or reopens
+/// the browser when that host is already running.
+/// </summary>
 internal static class AskJennyLauncher
 {
     private const string ApplicationUrl = "http://127.0.0.1:8000";
@@ -26,6 +30,7 @@ internal static class AskJennyLauncher
     [STAThread]
     private static void Main()
     {
+        // A second launch behaves like "open app" instead of creating another tray.
         if (IsTrayRunning())
         {
             if (!HasActiveBrowserSession())
@@ -77,6 +82,7 @@ internal static class AskJennyLauncher
 
     private static bool IsTrayRunning()
     {
+        // The tray process owns this named mutex for its entire lifetime.
         try
         {
             using (Mutex existingMutex = Mutex.OpenExisting(TrayMutexName))
@@ -96,6 +102,7 @@ internal static class AskJennyLauncher
 
     private static bool HasActiveBrowserSession()
     {
+        // Failure means "unknown/inactive" so an explicit user launch still opens a tab.
         try
         {
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
@@ -150,6 +157,7 @@ internal static class AskJennyLauncher
 
     private static string FindApplicationRoot()
     {
+        // Support installed layouts via an override, then portable layouts near the EXE.
         string configuredRoot = Environment.GetEnvironmentVariable("ASKJENNY_HOME");
         if (ContainsTrayScript(configuredRoot))
         {

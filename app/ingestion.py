@@ -1,3 +1,11 @@
+"""Validate uploads and mutate the local document library safely.
+
+``DocumentIngestionService`` extracts supported formats, resolves duplicates,
+preserves manual and automatic tags, writes the JSON source of truth, and then
+synchronizes the semantic index.  Backups let multi-step mutations roll back
+instead of leaving storage layers out of sync.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -78,6 +86,7 @@ WORDPROCESSING_MAIN_NS = "http://schemas.openxmlformats.org/wordprocessingml/200
 SPREADSHEET_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_DOCUMENT_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+PDF_EXTRACTION_CACHE_VERSION = 1
 
 
 @dataclass
@@ -114,6 +123,7 @@ class SimilarDocumentConflictItem:
 
 
 class SimilarDocumentConflictError(RuntimeError):
+    """Carry conflicts the browser must resolve before a batch is committed."""
     def __init__(self, conflicts: list[SimilarDocumentConflictItem]) -> None:
         self.conflicts = conflicts
         super().__init__("Similar documents already exist in the library.")
@@ -186,6 +196,7 @@ class LibraryBackupPayload:
 
 
 class DocumentIngestionService:
+    """Perform validated, rollback-aware writes to a local document library."""
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._lock = threading.Lock()
@@ -557,6 +568,71 @@ class DocumentIngestionService:
             semantic_index_rebuilt=semantic_index_rebuilt,
             message=message,
         )
+
+    def repair_document_source_auto_tags(
+        self,
+        repairs: dict[str, list[str]],
+    ) -> list[str]:
+        """Restore derived tag metadata without parsing content or embedding text."""
+        self._require_local_mutation_backend("Automatic tag repair")
+
+        normalized_repairs = {
+            str(document_id).strip(): normalize_tag_values(source_auto_tags)
+            for document_id, source_auto_tags in repairs.items()
+            if str(document_id).strip()
+        }
+        if not normalized_repairs:
+            return []
+
+        with self._lock:
+            existing_documents = load_json_documents(self._settings.docstore_json_path)
+            updated_documents = list(existing_documents)
+            repaired_document_ids: list[str] = []
+
+            for index, current_document in enumerate(existing_documents):
+                source_auto_tags = normalized_repairs.get(current_document.document_id)
+                if source_auto_tags is None:
+                    continue
+
+                manual_tags = self._strip_document_auto_tags(
+                    current_document.tags,
+                    current_document,
+                )
+                next_tags, next_auto_tags = self._build_document_tags(
+                    tags=manual_tags,
+                    folder=current_document.folder,
+                    source_auto_tags=source_auto_tags,
+                )
+                if (
+                    current_document.tags == next_tags
+                    and current_document.auto_tags == next_auto_tags
+                ):
+                    continue
+
+                updated_documents[index] = DocumentRecord(
+                    document_id=current_document.document_id,
+                    title=current_document.title,
+                    category=current_document.category,
+                    folder=current_document.folder,
+                    tags=next_tags,
+                    summary=current_document.summary,
+                    text=current_document.text,
+                    source_url=current_document.source_url,
+                    updated_at=current_document.updated_at,
+                    upload_key=current_document.upload_key,
+                    content_hash=current_document.content_hash,
+                    auto_tags=next_auto_tags,
+                )
+                repaired_document_ids.append(current_document.document_id)
+
+            if repaired_document_ids:
+                self._persist_documents(
+                    documents=updated_documents,
+                    backup_payload=self._backup_payload(),
+                    semantic_sync_mode="metadata_only_strict",
+                )
+
+        return repaired_document_ids
 
     def update_document_metadata(
         self,
@@ -1213,10 +1289,23 @@ class DocumentIngestionService:
 
     def _extract_pdf_document_text(self, *, filename: str, content_bytes: bytes) -> str:
         try:
-            return self._extract_pdf_document_text_impl(
+            cached_text = self._load_cached_pdf_extraction(
                 filename=filename,
                 content_bytes=content_bytes,
             )
+            if cached_text is not None:
+                return cached_text
+
+            extracted_text = self._extract_pdf_document_text_impl(
+                filename=filename,
+                content_bytes=content_bytes,
+            )
+            self._store_cached_pdf_extraction(
+                filename=filename,
+                content_bytes=content_bytes,
+                extracted_text=extracted_text,
+            )
+            return extracted_text
         except (OSError, RuntimeError, ValueError) as exc:
             logger.error(
                 "PDF ingestion failed: filename=%s; byte_count=%d; error=%s",
@@ -1232,6 +1321,150 @@ class DocumentIngestionService:
                 len(content_bytes),
             )
             raise
+
+    def _load_cached_pdf_extraction(
+        self,
+        *,
+        filename: str,
+        content_bytes: bytes,
+    ) -> str | None:
+        cache_path = self._pdf_extraction_cache_file(content_bytes)
+        if cache_path is None or not cache_path.exists():
+            return None
+
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "PDF extraction cache entry is unreadable; rebuilding: filename=%s; cache=%s; error=%s",
+                filename,
+                cache_path.name,
+                exc,
+            )
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        extracted_text = payload.get("extracted_text")
+        if (
+            payload.get("version") != PDF_EXTRACTION_CACHE_VERSION
+            or not isinstance(extracted_text, str)
+            or not extracted_text.strip()
+        ):
+            return None
+
+        logger.info(
+            "PDF extraction cache hit: filename=%s; cache=%s; extracted_character_count=%d.",
+            filename,
+            cache_path.name,
+            len(extracted_text),
+        )
+        return extracted_text
+
+    def _store_cached_pdf_extraction(
+        self,
+        *,
+        filename: str,
+        content_bytes: bytes,
+        extracted_text: str,
+    ) -> None:
+        cache_path = self._pdf_extraction_cache_file(content_bytes)
+        if cache_path is None or not extracted_text.strip():
+            return
+
+        temporary_path = cache_path.with_name(
+            f".{cache_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": PDF_EXTRACTION_CACHE_VERSION,
+                "source_sha256": hashlib.sha256(content_bytes).hexdigest(),
+                "settings": self._pdf_extraction_cache_settings(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "extracted_text": extracted_text,
+            }
+            temporary_path.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(cache_path)
+            logger.info(
+                "PDF extraction cached: filename=%s; cache=%s.",
+                filename,
+                cache_path.name,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Could not persist PDF extraction cache: filename=%s; error=%s",
+                filename,
+                exc,
+            )
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _pdf_extraction_cache_file(self, content_bytes: bytes) -> Path | None:
+        if not bool(self._pdf_ocr_setting("pdf_extraction_cache_enabled", True)):
+            return None
+
+        configured_path = self._pdf_ocr_setting("pdf_extraction_cache_path", None)
+        if configured_path is None:
+            document_path = self._pdf_ocr_setting("docstore_json_path", None)
+            if document_path is None:
+                return None
+            cache_root = Path(document_path).parent / "pdf_extraction_cache"
+        else:
+            cache_root = Path(configured_path)
+
+        settings_payload = json.dumps(
+            self._pdf_extraction_cache_settings(),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256()
+        digest.update(f"v{PDF_EXTRACTION_CACHE_VERSION}".encode("ascii"))
+        digest.update(b"\0")
+        digest.update(settings_payload)
+        digest.update(b"\0")
+        digest.update(content_bytes)
+        return cache_root / f"{digest.hexdigest()}.json"
+
+    def _pdf_extraction_cache_settings(self) -> dict[str, Any]:
+        return {
+            "pdf_max_pages": int(self._pdf_ocr_setting("pdf_max_pages", 500)),
+            "pdf_ocr_enabled": bool(self._pdf_ocr_setting("pdf_ocr_enabled", True)),
+            "pdf_ocr_engine": str(self._pdf_ocr_setting("pdf_ocr_engine", "tesseract")),
+            "pdf_ocr_language": str(self._pdf_ocr_setting("pdf_ocr_language", "eng")),
+            "pdf_ocr_dpi": int(self._pdf_ocr_setting("pdf_ocr_dpi", 300)),
+            "pdf_ocr_min_native_text_chars": int(
+                self._pdf_ocr_setting("pdf_ocr_min_native_text_chars", 40)
+            ),
+            "pdf_image_ocr_enabled": bool(
+                self._pdf_ocr_setting("pdf_image_ocr_enabled", True)
+            ),
+            "pdf_image_ocr_max_pages": int(
+                self._pdf_ocr_setting("pdf_image_ocr_max_pages", 100)
+            ),
+            "pdf_vision_enabled": bool(
+                self._pdf_ocr_setting("pdf_vision_enabled", True)
+            ),
+            "pdf_vision_model": str(
+                self._pdf_ocr_setting("pdf_vision_model", "gpt-5.6-luna")
+            ),
+            "pdf_vision_max_pages": int(
+                self._pdf_ocr_setting("pdf_vision_max_pages", 12)
+            ),
+            "pdf_vision_batch_size": int(
+                self._pdf_ocr_setting("pdf_vision_batch_size", 3)
+            ),
+            "pdf_vision_dpi": int(self._pdf_ocr_setting("pdf_vision_dpi", 144)),
+            "pdf_vision_max_dimension": int(
+                self._pdf_ocr_setting("pdf_vision_max_dimension", 1800)
+            ),
+        }
 
     def _extract_pdf_document_text_impl(self, *, filename: str, content_bytes: bytes) -> str:
         logger.info(
@@ -2128,6 +2361,7 @@ class DocumentIngestionService:
                         updated_at=current_document.updated_at,
                         upload_key=candidate.upload_key,
                         content_hash=candidate.content_hash or current_document.content_hash,
+                        auto_tags=current_document.auto_tags,
                     )
                     merged_documents[document_index_by_id[matched_document_id]] = replacement_document
                     for upload_key in self._document_upload_key_candidates(replacement_document):
@@ -2161,6 +2395,7 @@ class DocumentIngestionService:
                     text=candidate.text,
                     source_url=candidate.source_url if candidate.source_url is not None else current_document.source_url,
                 ),
+                auto_tags=candidate.auto_tags,
             )
             merged_documents[document_index_by_id[matched_document_id]] = replacement_document
             if replacement_document.upload_key:
@@ -2587,13 +2822,15 @@ class DocumentIngestionService:
                             chunk_overlap_words=self._settings.semantic_chunk_overlap_words,
                             batch_size=self._settings.semantic_embedding_batch_size,
                         )
-                elif semantic_sync_mode == "metadata_only":
+                elif semantic_sync_mode in {"metadata_only", "metadata_only_strict"}:
                     try:
                         sync_result = sync_semantic_metadata_only(
                             index_path=self._settings.semantic_index_path,
                             documents=documents,
                         )
                     except Exception:
+                        if semantic_sync_mode == "metadata_only_strict":
+                            raise
                         sync_result = sync_semantic_index(
                             source_path=self._settings.docstore_json_path,
                             index_path=self._settings.semantic_index_path,

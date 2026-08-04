@@ -1,3 +1,5 @@
+"""Check reasoning/source preferences survive saving, loading, and updates."""
+
 from __future__ import annotations
 
 from pathlib import Path

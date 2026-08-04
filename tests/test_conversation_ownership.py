@@ -1,3 +1,5 @@
+"""Verify saved conversations and chat mutations are isolated by owner."""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,11 @@
+"""FastAPI composition root and HTTP interface for Ask Jenny.
+
+This module wires configuration, persistence, ingestion, watched folders, chat,
+authentication, and static UI delivery into one local server.  Endpoint handlers
+stay intentionally thin: they authorize and translate HTTP data, while domain
+services own extraction, retrieval, generation, and persistence behavior.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -11,7 +19,7 @@ import threading
 import time
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from openai import OpenAIError
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -98,8 +106,9 @@ default_admin_user = user_store.ensure_default_admin(
     password=settings.default_admin_password,
 )
 conversation_store = SavedConversationStore(
-    settings.saved_conversations_path,
+    settings.saved_conversations_database_path,
     default_owner_user_id=default_admin_user.user_id,
+    legacy_json_path=settings.saved_conversations_path,
 )
 session_manager = SessionManager(
     settings.session_ttl_minutes,
@@ -128,6 +137,7 @@ _network_status_cache: dict[str, object] | None = None
 
 
 def _get_openai_network_status(*, force: bool = False) -> dict[str, object]:
+    """Return a short-lived cached probe so routine health checks stay cheap."""
     global _network_status_cache, _network_status_checked_at
 
     now = time.monotonic()
@@ -162,6 +172,7 @@ def _render_index_html() -> str:
 
 
 def _invalidate_document_store_cache() -> None:
+    """Make subsequent reads observe library changes made by write services."""
     document_store.invalidate_cache()
 
 
@@ -177,6 +188,7 @@ def _watch_sync_result_from_payload(result: object) -> WatchedFolderSyncResult:
 
 
 def _open_local_folder_picker() -> str | None:
+    """Open a native folder chooser only when the server is running locally."""
     if platform.system() == "Windows":
         return _open_windows_folder_picker()
     return _open_tk_folder_picker()
@@ -498,13 +510,25 @@ def _set_auth_cookie(response: Response, token: str) -> None:
 
 
 def _require_authenticated_user(request: Request):
+    """Resolve the signed-in user or terminate the request with HTTP 401."""
     user = user_store.get_user_for_session(request.cookies.get(AUTH_COOKIE_NAME))
     if user is None:
-        raise HTTPException(status_code=401, detail="Sign in to access conversations.")
+        raise HTTPException(status_code=401, detail="Sign in to access this resource.")
     if user.must_change_password:
         raise HTTPException(
             status_code=403,
-            detail="Change the temporary password before accessing conversations.",
+            detail="Change the temporary password before accessing this resource.",
+        )
+    return user
+
+
+def _require_library_manager(request: Request):
+    """Require a signed-in administrator or library manager."""
+    user = _require_authenticated_user(request)
+    if user.role not in {"admin", "library_manager"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator or Library Manager access is required.",
         )
     return user
 
@@ -606,7 +630,11 @@ def logout(request: Request, response: Response) -> AuthSessionResponse:
     )
 
 
-@app.post("/api/local-folders/browse", response_model=LocalFolderBrowseResponse)
+@app.post(
+    "/api/local-folders/browse",
+    response_model=LocalFolderBrowseResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def browse_local_folder() -> LocalFolderBrowseResponse:
     try:
         selected_path = _open_local_folder_picker()
@@ -632,7 +660,11 @@ def browse_local_folder() -> LocalFolderBrowseResponse:
         ) from exc
 
 
-@app.get("/api/watch-folders", response_model=WatchedFolderListResponse)
+@app.get(
+    "/api/watch-folders",
+    response_model=WatchedFolderListResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def list_watched_folders() -> WatchedFolderListResponse:
     return WatchedFolderListResponse(
         watched_folders=[
@@ -645,6 +677,7 @@ def list_watched_folders() -> WatchedFolderListResponse:
 @app.post(
     "/api/watch-folders/{watch_id}/open-source",
     response_model=WatchedFolderOpenSourceResponse,
+    dependencies=[Depends(_require_library_manager)],
 )
 def open_watched_folder_source(watch_id: str) -> WatchedFolderOpenSourceResponse:
     try:
@@ -667,7 +700,11 @@ def open_watched_folder_source(watch_id: str) -> WatchedFolderOpenSourceResponse
         ) from exc
 
 
-@app.post("/api/watch-folders", response_model=WatchedFolderCreateResponse)
+@app.post(
+    "/api/watch-folders",
+    response_model=WatchedFolderCreateResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def create_watched_folder(request: WatchedFolderCreateRequest) -> WatchedFolderCreateResponse:
     try:
         watched_folder = watch_folder_service.create_watcher(
@@ -697,7 +734,11 @@ def create_watched_folder(request: WatchedFolderCreateRequest) -> WatchedFolderC
         ) from exc
 
 
-@app.patch("/api/watch-folders/{watch_id}", response_model=WatchedFolderUpdateResponse)
+@app.patch(
+    "/api/watch-folders/{watch_id}",
+    response_model=WatchedFolderUpdateResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def update_watched_folder(watch_id: str, request: WatchedFolderUpdateRequest) -> WatchedFolderUpdateResponse:
     try:
         watched_folder = watch_folder_service.update_watcher(
@@ -719,7 +760,11 @@ def update_watched_folder(watch_id: str, request: WatchedFolderUpdateRequest) ->
         ) from exc
 
 
-@app.post("/api/watch-folders/sync", response_model=WatchedFolderSyncResponse)
+@app.post(
+    "/api/watch-folders/sync",
+    response_model=WatchedFolderSyncResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def sync_all_watched_folders() -> WatchedFolderSyncResponse:
     try:
         results = watch_folder_service.sync_all(force=True)
@@ -738,7 +783,11 @@ def sync_all_watched_folders() -> WatchedFolderSyncResponse:
         ) from exc
 
 
-@app.post("/api/watch-folders/{watch_id}/sync", response_model=WatchedFolderSyncResponse)
+@app.post(
+    "/api/watch-folders/{watch_id}/sync",
+    response_model=WatchedFolderSyncResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def sync_watched_folder(watch_id: str) -> WatchedFolderSyncResponse:
     try:
         result = watch_folder_service.sync_watcher(watch_id)
@@ -759,7 +808,11 @@ def sync_watched_folder(watch_id: str) -> WatchedFolderSyncResponse:
         ) from exc
 
 
-@app.delete("/api/watch-folders/{watch_id}", response_model=WatchedFolderDeleteResponse)
+@app.delete(
+    "/api/watch-folders/{watch_id}",
+    response_model=WatchedFolderDeleteResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def delete_watched_folder(watch_id: str) -> WatchedFolderDeleteResponse:
     deleted = watch_folder_service.delete_watcher(watch_id)
     if not deleted:
@@ -970,7 +1023,11 @@ def delete_conversation(conversation_id: str, request: Request) -> ConversationD
         ) from exc
 
 
-@app.get("/api/documents", response_model=DocumentLibraryResponse)
+@app.get(
+    "/api/documents",
+    response_model=DocumentLibraryResponse,
+    dependencies=[Depends(_require_authenticated_user)],
+)
 def list_documents() -> DocumentLibraryResponse:
     library = document_store.list_documents()
     folder_records = library.folders
@@ -1015,7 +1072,11 @@ def list_documents() -> DocumentLibraryResponse:
     )
 
 
-@app.get("/api/documents/{document_id}", response_model=DocumentDetailResponse)
+@app.get(
+    "/api/documents/{document_id}",
+    response_model=DocumentDetailResponse,
+    dependencies=[Depends(_require_authenticated_user)],
+)
 def get_document(document_id: str) -> DocumentDetailResponse:
     document = document_store.get_document(document_id)
     if document is None:
@@ -1041,7 +1102,11 @@ def get_document(document_id: str) -> DocumentDetailResponse:
     )
 
 
-@app.post("/api/documents/upload", response_model=DocumentUploadResponse)
+@app.post(
+    "/api/documents/upload",
+    response_model=DocumentUploadResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def upload_document(request: DocumentUploadRequest) -> DocumentUploadResponse:
     try:
         outcome = ingestion_service.ingest_upload(
@@ -1114,7 +1179,11 @@ def upload_document(request: DocumentUploadRequest) -> DocumentUploadResponse:
         ) from exc
 
 
-@app.post("/api/documents/upload-batch", response_model=DocumentUploadResponse)
+@app.post(
+    "/api/documents/upload-batch",
+    response_model=DocumentUploadResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def upload_documents_batch(request: DocumentUploadBatchRequest) -> DocumentUploadResponse:
     try:
         outcome = ingestion_service.ingest_upload_batch(
@@ -1176,7 +1245,11 @@ def upload_documents_batch(request: DocumentUploadBatchRequest) -> DocumentUploa
         ) from exc
 
 
-@app.post("/api/documents/generate", response_model=DocumentGenerationResponse)
+@app.post(
+    "/api/documents/generate",
+    response_model=DocumentGenerationResponse,
+    dependencies=[Depends(_require_authenticated_user)],
+)
 def generate_document(request: DocumentGenerationRequest) -> DocumentGenerationResponse:
     try:
         result = document_generator.generate_document(
@@ -1208,7 +1281,11 @@ def generate_document(request: DocumentGenerationRequest) -> DocumentGenerationR
         ) from exc
 
 
-@app.post("/api/documents/delete", response_model=DocumentDeleteResponse)
+@app.post(
+    "/api/documents/delete",
+    response_model=DocumentDeleteResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def delete_documents(request: DocumentDeleteRequest) -> DocumentDeleteResponse:
     try:
         outcome = ingestion_service.delete_documents(
@@ -1232,7 +1309,10 @@ def delete_documents(request: DocumentDeleteRequest) -> DocumentDeleteResponse:
         ) from exc
 
 
-@app.post("/api/documents/delete/stream")
+@app.post(
+    "/api/documents/delete/stream",
+    dependencies=[Depends(_require_library_manager)],
+)
 def delete_documents_stream(request: DocumentDeleteRequest) -> StreamingResponse:
     events: queue.Queue[dict[str, object]] = queue.Queue()
 
@@ -1303,7 +1383,11 @@ def delete_documents_stream(request: DocumentDeleteRequest) -> StreamingResponse
     )
 
 
-@app.post("/api/documents/tags", response_model=DocumentTagUpdateResponse)
+@app.post(
+    "/api/documents/tags",
+    response_model=DocumentTagUpdateResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def update_document_tags(request: DocumentTagUpdateRequest) -> DocumentTagUpdateResponse:
     try:
         outcome = ingestion_service.update_document_tags(
@@ -1329,7 +1413,11 @@ def update_document_tags(request: DocumentTagUpdateRequest) -> DocumentTagUpdate
         ) from exc
 
 
-@app.post("/api/documents/metadata", response_model=DocumentMetadataUpdateResponse)
+@app.post(
+    "/api/documents/metadata",
+    response_model=DocumentMetadataUpdateResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def update_document_metadata(request: DocumentMetadataUpdateRequest) -> DocumentMetadataUpdateResponse:
     try:
         outcome = ingestion_service.update_document_metadata(
@@ -1361,7 +1449,11 @@ def update_document_metadata(request: DocumentMetadataUpdateRequest) -> Document
         ) from exc
 
 
-@app.post("/api/folders/create", response_model=FolderCreateResponse)
+@app.post(
+    "/api/folders/create",
+    response_model=FolderCreateResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def create_folder(request: FolderCreateRequest) -> FolderCreateResponse:
     try:
         outcome = ingestion_service.create_folder(
@@ -1387,7 +1479,11 @@ def create_folder(request: FolderCreateRequest) -> FolderCreateResponse:
         ) from exc
 
 
-@app.post("/api/folders/delete", response_model=FolderDeleteResponse)
+@app.post(
+    "/api/folders/delete",
+    response_model=FolderDeleteResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def delete_folder(request: FolderDeleteRequest) -> FolderDeleteResponse:
     try:
         (
@@ -1431,7 +1527,11 @@ def delete_folder(request: FolderDeleteRequest) -> FolderDeleteResponse:
         ) from exc
 
 
-@app.post("/api/folders/move", response_model=FolderMoveResponse)
+@app.post(
+    "/api/folders/move",
+    response_model=FolderMoveResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def move_folder(request: FolderMoveRequest) -> FolderMoveResponse:
     try:
         outcome = ingestion_service.move_folder(
@@ -1462,7 +1562,11 @@ def move_folder(request: FolderMoveRequest) -> FolderMoveResponse:
         ) from exc
 
 
-@app.post("/api/folders/rename", response_model=FolderRenameResponse)
+@app.post(
+    "/api/folders/rename",
+    response_model=FolderRenameResponse,
+    dependencies=[Depends(_require_library_manager)],
+)
 def rename_folder(request: FolderRenameRequest) -> FolderRenameResponse:
     try:
         outcome = ingestion_service.rename_folder(

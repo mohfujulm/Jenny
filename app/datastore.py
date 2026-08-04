@@ -1,3 +1,11 @@
+"""Document persistence and retrieval backends.
+
+The application programs against ``BaseDocumentStore``.  Its adapters provide
+JSON keyword search, local SQLite semantic search with embeddings, or a remote
+HTTP datastore.  Rebuild and sync helpers keep source metadata and derived
+semantic chunks aligned.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -17,6 +25,7 @@ import httpx
 from openai import OpenAI
 
 from app.config import Settings
+from app.openai_usage import record_openai_usage, response_has_usage
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
@@ -25,6 +34,7 @@ AUTO_TAG_PATH_PREFIX = "folder-path:"
 
 
 def normalize_folder_path(folder_id: str) -> str:
+    """Canonicalize a folder into a slash-separated relative path."""
     return "/".join(
         segment.strip()
         for segment in re.split(r"[\\/]+", str(folder_id or "").strip())
@@ -33,6 +43,7 @@ def normalize_folder_path(folder_id: str) -> str:
 
 
 def iter_folder_lineage(folder_id: str) -> list[str]:
+    """Return a folder and its ancestors from shallowest to deepest."""
     normalized = normalize_folder_path(folder_id)
     if not normalized:
         return []
@@ -46,6 +57,7 @@ def iter_folder_lineage(folder_id: str) -> list[str]:
 
 
 def normalize_tag_values(raw_tags: Any) -> list[str]:
+    """Trim and case-insensitively deduplicate supplied tags."""
     if isinstance(raw_tags, str):
         items = raw_tags.split(",")
     elif isinstance(raw_tags, list):
@@ -180,6 +192,7 @@ def build_folder_records(
 
 @dataclass
 class DocumentRecord:
+    """Canonical metadata and extracted text for one library document."""
     document_id: str
     title: str
     category: str
@@ -211,6 +224,7 @@ class DocumentRecord:
 
 @dataclass
 class SearchHit:
+    """Ranked document excerpt returned by keyword or semantic retrieval."""
     document_id: str
     title: str
     category: str
@@ -228,6 +242,7 @@ class SearchHit:
 
 @dataclass
 class SemanticChunk:
+    """A searchable passage paired with its embedding vector."""
     chunk_id: str
     document_id: str
     chunk_index: int
@@ -240,6 +255,7 @@ class SemanticChunk:
 
 @dataclass(frozen=True)
 class RetrievalContext:
+    """Normalized access filter applied consistently by every backend."""
     folder_ids: frozenset[str] = field(default_factory=frozenset)
     document_ids: frozenset[str] = field(default_factory=frozenset)
 
@@ -303,6 +319,7 @@ class DocumentLibraryRecord:
 
 
 class BaseDocumentStore(ABC):
+    """Retrieval contract shared by local and remote document stores."""
     def invalidate_cache(self) -> None:
         return None
 
@@ -509,6 +526,8 @@ def _embed_texts(
     texts: list[str],
     model: str,
     dimensions: int | None,
+    purpose: str,
+    chunk_count: int | None = None,
 ) -> list[list[float]]:
     request: dict[str, Any] = {
         "input": texts,
@@ -517,7 +536,27 @@ def _embed_texts(
     }
     if dimensions is not None:
         request["dimensions"] = dimensions
-    response = client.embeddings.create(**request)
+    try:
+        response = client.embeddings.create(**request)
+    except Exception as exc:
+        record_openai_usage(
+            operation="embeddings.create",
+            purpose=purpose,
+            model=model,
+            error=exc,
+            item_count=len(texts),
+            chunk_count=chunk_count,
+        )
+        raise
+    if response_has_usage(response):
+        record_openai_usage(
+            operation="embeddings.create",
+            purpose=purpose,
+            model=model,
+            response=response,
+            item_count=len(texts),
+            chunk_count=chunk_count,
+        )
     return [item.embedding for item in response.data]
 
 
@@ -528,6 +567,7 @@ def _embed_texts_in_batches(
     model: str,
     dimensions: int | None,
     batch_size: int,
+    purpose: str,
 ) -> list[list[float]]:
     embeddings: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
@@ -538,6 +578,8 @@ def _embed_texts_in_batches(
                 texts=batch,
                 model=model,
                 dimensions=dimensions,
+                purpose=purpose,
+                chunk_count=len(batch),
             )
         )
     return embeddings
@@ -586,6 +628,7 @@ def _build_library_record(
 
 
 class JsonDocumentStore(BaseDocumentStore):
+    """Small-corpus store using token scoring over an in-memory JSON snapshot."""
     def __init__(self, path: Path) -> None:
         self._path = path
         self._loaded_mtime: float | None = None
@@ -686,6 +729,7 @@ class JsonDocumentStore(BaseDocumentStore):
 
 
 class SemanticDocumentStore(BaseDocumentStore):
+    """SQLite store combining vector similarity with lexical signals."""
     def __init__(
         self,
         index_path: Path,
@@ -813,15 +857,21 @@ class SemanticDocumentStore(BaseDocumentStore):
             return []
 
         active_context = context or RetrievalContext()
+        normalized_search_profile = "answer" if search_profile == "answer" else "search"
         query_embedding = _embed_texts(
             client=self.client,
             texts=[query],
-            model=self._answer_embedding_model if search_profile == "answer" else self._search_embedding_model,
+            model=(
+                self._answer_embedding_model
+                if normalized_search_profile == "answer"
+                else self._search_embedding_model
+            ),
             dimensions=(
                 self._answer_embedding_dimensions
-                if search_profile == "answer"
+                if normalized_search_profile == "answer"
                 else self._search_embedding_dimensions
             ),
+            purpose=f"semantic_query_{normalized_search_profile}",
         )[0]
         query_norm = _vector_norm(query_embedding)
         query_tokens = _tokenize(query)
@@ -832,10 +882,14 @@ class SemanticDocumentStore(BaseDocumentStore):
             if not active_context.allows_document(document):
                 continue
 
-            chunk_embedding = chunk.answer_embedding if search_profile == "answer" else chunk.search_embedding
+            chunk_embedding = (
+                chunk.answer_embedding
+                if normalized_search_profile == "answer"
+                else chunk.search_embedding
+            )
             chunk_embedding_norm = (
                 chunk.answer_embedding_norm
-                if search_profile == "answer"
+                if normalized_search_profile == "answer"
                 else chunk.search_embedding_norm
             )
             score = _cosine_similarity(query_embedding, query_norm, chunk_embedding, chunk_embedding_norm)
@@ -887,6 +941,7 @@ class SemanticDocumentStore(BaseDocumentStore):
 
 
 class HttpDocumentStore(BaseDocumentStore):
+    """Adapter for remote search, fetch, and library-listing endpoints."""
     def __init__(self, base_url: str, api_key: str | None, timeout_seconds: int) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
@@ -1059,6 +1114,7 @@ def rebuild_semantic_index(
         model=search_embedding_model,
         dimensions=search_embedding_dimensions,
         batch_size=batch_size,
+        purpose="semantic_index_rebuild_search",
     )
     answer_embeddings = _embed_texts_in_batches(
         client=client,
@@ -1066,6 +1122,7 @@ def rebuild_semantic_index(
         model=answer_embedding_model,
         dimensions=answer_embedding_dimensions,
         batch_size=batch_size,
+        purpose="semantic_index_rebuild_answer",
     )
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1373,6 +1430,7 @@ def sync_semantic_index(
             model=search_embedding_model,
             dimensions=search_embedding_dimensions,
             batch_size=batch_size,
+            purpose="semantic_index_sync_search",
         )
         answer_embeddings = _embed_texts_in_batches(
             client=client,
@@ -1380,6 +1438,7 @@ def sync_semantic_index(
             model=answer_embedding_model,
             dimensions=answer_embedding_dimensions,
             batch_size=batch_size,
+            purpose="semantic_index_sync_answer",
         )
 
     index_path.parent.mkdir(parents=True, exist_ok=True)
