@@ -1,3 +1,12 @@
+/*
+ * Ask Jenny visual system.
+ *
+ * Rules are grouped by feature, followed by intentional refinement layers for
+ * the newer compact library explorer. Later rules win through the CSS cascade;
+ * responsive blocks live beside the feature they adapt.
+ */
+
+/* Global tokens, reset, and application shell */
 :root {
   --ui-scale: 0.85;
   --bg: #f3efe5;
@@ -69,6 +78,7 @@ body::before {
 }
 
 .sidebar,
+/* Main chat workspace, messages, and composer */
 .chat-stage {
   position: relative;
   min-width: 0;
@@ -1581,6 +1591,7 @@ body::before {
   align-items: end;
 }
 
+/* Document library explorer */
 .library-breadcrumbs {
   display: flex;
   align-items: center;
@@ -2738,6 +2749,7 @@ body::before {
 .upload-card,
 .selection-card,
 .explorer-surface,
+/* Document metadata editor */
 .document-editor-card {
   padding: 12px;
   border: 1px solid var(--line);
@@ -3228,6 +3240,7 @@ body::before {
 .browser-library-header .eyebrow,
 .browser-library-header h3,
 .browser-library-header .mode-description,
+/* Compact library-explorer refinement layer */
 .library-action-status,
 .explorer-tools-copy,
 .library-breadcrumbs,
@@ -4259,6 +4272,7 @@ body::before {
   grid-column: 1 / -1;
 }
 
+/* Full-screen source-image lightbox */
 body.is-image-lightbox-open {
   overflow: hidden;
 }
@@ -4935,6 +4949,7 @@ body.is-image-lightbox-open {
   overflow-y: auto;
 }
 
+/* Authentication and account-management panel */
 .auth-view {
   display: flex;
   flex-direction: column;

@@ -1,3 +1,10 @@
+"""Track browser tabs using expiring in-memory heartbeat records.
+
+The Windows launcher uses this registry to decide whether closing the last UI
+tab should also stop the local server.  Monotonic time prevents wall-clock
+changes from accidentally expiring or extending sessions.
+"""
+
 from __future__ import annotations
 
 import re

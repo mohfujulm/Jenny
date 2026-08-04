@@ -1,3 +1,5 @@
+"""Verify selective semantic-index deletion and progress reporting."""
+
 from __future__ import annotations
 
 import sqlite3

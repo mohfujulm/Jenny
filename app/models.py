@@ -1,3 +1,10 @@
+"""Shared API contracts and in-memory chat state.
+
+Pydantic models in this module form the boundary between the browser and
+FastAPI: they validate untrusted requests and define stable response shapes.
+``SessionState`` is internal mutable state and is not serialized directly.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -17,11 +24,13 @@ GeneratedDocumentFormat = Literal["txt", "docx", "pdf", "xlsx"]
 
 
 class ContextFilter(BaseModel):
+    """Folders and individual documents allowed to participate in retrieval."""
     folder_ids: list[str] = Field(default_factory=list)
     document_ids: list[str] = Field(default_factory=list)
 
 
 class ChatImage(BaseModel):
+    """A user-attached image encoded for transport in a JSON chat request."""
     filename: str = Field(min_length=1, max_length=180)
     mime_type: Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
     content_base64: str = Field(min_length=1, max_length=12_000_000)
@@ -40,6 +49,7 @@ class ChatImage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """Validated inputs required to run one assistant turn."""
     request_id: str | None = Field(default=None, min_length=1, max_length=160)
     conversation_id: str | None = None
     message: str = Field(default="", max_length=8000)
@@ -56,6 +66,7 @@ class ChatRequest(BaseModel):
 
 
 class Citation(BaseModel):
+    """Source metadata displayed alongside a grounded assistant answer."""
     document_id: str
     title: str
     category: str | None = None
@@ -64,12 +75,14 @@ class Citation(BaseModel):
 
 
 class ToolTrace(BaseModel):
+    """User-safe summary of a tool invocation performed during a chat turn."""
     tool_name: str
     arguments: dict[str, Any]
     summary: str
 
 
 class GeneratedChatDocument(BaseModel):
+    """Downloadable document created as a side effect of a chat response."""
     filename: str
     mime_type: str
     content_base64: str
@@ -79,6 +92,7 @@ class GeneratedChatDocument(BaseModel):
 
 
 class ConversationMessage(BaseModel):
+    """Persistable user or assistant message and its supporting metadata."""
     role: Literal["assistant", "user", "system"]
     label: str
     body: str
@@ -90,6 +104,7 @@ class ConversationMessage(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """Complete result returned after the agent finishes one request."""
     conversation_id: str
     assistant_message: str
     citations: list[Citation]
@@ -102,6 +117,7 @@ class ChatResponse(BaseModel):
 
 
 class SavedConversationSummary(BaseModel):
+    """Lightweight conversation data used to render the history sidebar."""
     conversation_id: str
     owner_user_id: str
     title: str | None = None
@@ -115,6 +131,7 @@ class SavedConversationSummary(BaseModel):
 
 
 class SavedConversationDetail(SavedConversationSummary):
+    """A saved conversation summary plus its full ordered transcript."""
     context_filter: ContextFilter = Field(default_factory=ContextFilter)
     messages: list[ConversationMessage] = Field(default_factory=list)
 
@@ -166,6 +183,7 @@ class ConversationPairDeleteResponse(BaseModel):
 
 
 class UserSummary(BaseModel):
+    """Non-secret account fields safe to send to an authenticated browser."""
     user_id: str
     username: str
     display_name: str
@@ -205,6 +223,7 @@ class FolderSummary(BaseModel):
 
 
 class DocumentSummary(BaseModel):
+    """Document metadata used by listings, scope selection, and citations."""
     document_id: str
     title: str
     category: str
@@ -226,6 +245,7 @@ class DocumentLibraryResponse(BaseModel):
 
 
 class DocumentDetailResponse(DocumentSummary):
+    """Document summary augmented with full extracted content for preview."""
     text: str
 
 
@@ -262,6 +282,7 @@ class DocumentUploadResponse(BaseModel):
 
 
 class WatchedFolderSummary(BaseModel):
+    """Configuration and latest synchronization status for one local folder."""
     watch_id: str
     alias: str | None = None
     display_name: str
@@ -365,6 +386,7 @@ class WatchedFolderOpenSourceResponse(BaseModel):
 
 
 class DocumentGenerationRequest(BaseModel):
+    """Instructions, output type, and source scope for generated files."""
     instructions: str = Field(min_length=1, max_length=12000)
     title: str | None = Field(default=None, max_length=160)
     output_format: GeneratedDocumentFormat = "docx"
@@ -487,10 +509,14 @@ class FolderRenameResponse(BaseModel):
 
 @dataclass
 class SessionState:
+    """Mutable server-side state for one active or loaded conversation."""
     conversation_id: str
     owner_user_id: str
     history: list[Any] = field(default_factory=list)
     transcript: list[ConversationMessage] = field(default_factory=list)
+    # First transcript message already represented verbatim in ``history``.
+    # Older messages remain persisted and are eligible for bounded local recall.
+    history_start_index: int = 0
     source_mode: SourceMode = "broader"
     reasoning_mode: ReasoningMode = "standard"
     context_filter: ContextFilter = field(default_factory=ContextFilter)

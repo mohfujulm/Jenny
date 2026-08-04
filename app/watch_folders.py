@@ -1,3 +1,11 @@
+"""Synchronize configured filesystem trees into the document library.
+
+Each watcher records its source, destination folder, schedule, and last result.
+Synchronization detects new, changed, moved, and removed files, then reuses the
+ingestion service so watched and manual uploads follow the same extraction and
+indexing rules.  A background thread periodically runs watchers that are due.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -50,6 +58,7 @@ LibraryChangedCallback = Callable[[], None]
 
 @dataclass
 class WatchedFolderRecord:
+    """Persisted watcher configuration and latest synchronization state."""
     watch_id: str
     alias: str | None
     display_name: str
@@ -76,6 +85,7 @@ class WatchedFolderRecord:
 
 @dataclass
 class WatchSyncResult:
+    """Counts and diagnostics from one completed watcher pass."""
     watch_id: str
     display_name: str
     source_path: str
@@ -94,6 +104,7 @@ class WatchSyncResult:
 
 @dataclass
 class PendingWatchedFile:
+    """Source file prepared for ingestion but not yet committed."""
     path: Path
     relative_path: str
     upload_key_base: str
@@ -102,6 +113,7 @@ class PendingWatchedFile:
 
 
 class WatchedFolderService:
+    """Own watcher configuration, scheduling, relocation, and synchronization."""
     def __init__(
         self,
         settings: Settings,
@@ -430,7 +442,10 @@ class WatchedFolderService:
         with self._sync_lock:
             result = self._sync_record_locked(record)
             self._persist_sync_result(result)
-            if result.semantic_index_rebuilt and self._on_library_changed is not None:
+            if (
+                (result.semantic_index_rebuilt or result.imported_count > 0 or result.updated_count > 0)
+                and self._on_library_changed is not None
+            ):
                 self._on_library_changed()
             return result
 
@@ -461,22 +476,40 @@ class WatchedFolderService:
                 record = replace(record, library_folder=resolved_library_folder)
                 self._persist_library_folder(record.watch_id, resolved_library_folder)
 
-            pending_files, scanned_count, skipped_count = self._collect_pending_files(record, source_path)
+            (
+                pending_files,
+                source_tag_repairs,
+                scanned_count,
+                skipped_count,
+            ) = self._collect_sync_actions(record, source_path)
+            repaired_document_ids = (
+                self._ingestion_service.repair_document_source_auto_tags(source_tag_repairs)
+                if source_tag_repairs
+                else []
+            )
+            repaired_count = len(repaired_document_ids)
             if not pending_files:
+                message = f"Scanned {scanned_count} file(s). No new or changed documents found."
+                if repaired_count:
+                    message = (
+                        f"Scanned {scanned_count} file(s). Repaired tag metadata for "
+                        f"{repaired_count} unchanged document(s) without reading or re-embedding "
+                        "the source files."
+                    )
                 return WatchSyncResult(
                     watch_id=record.watch_id,
                     display_name=record.display_name,
                     source_path=str(source_path),
                     status="success",
                     message=self._append_relocation_message(
-                        f"Scanned {scanned_count} file(s). No new or changed documents found.",
+                        message,
                         relocated_from=relocated_from,
                         relocated_to=source_path,
                     ),
                     scanned_count=scanned_count,
                     imported_count=0,
                     created_count=0,
-                    updated_count=0,
+                    updated_count=repaired_count,
                     unchanged_count=0,
                     skipped_count=skipped_count,
                     error_count=0,
@@ -513,6 +546,11 @@ class WatchedFolderService:
                 outcome_message = "No documents were imported."
             else:
                 outcome_message = outcome.message
+            if repaired_count:
+                outcome_message = (
+                    f"{outcome_message} Repaired tag metadata for {repaired_count} unchanged "
+                    "document(s) without reading or re-embedding their source files."
+                )
             message = self._append_file_errors(outcome_message, file_errors)
             message = self._append_relocation_message(
                 message,
@@ -527,14 +565,14 @@ class WatchedFolderService:
                     "success"
                     if error_count == 0
                     else "partial"
-                    if imported_count > 0
+                    if imported_count > 0 or repaired_count > 0
                     else "error"
                 ),
                 message=message,
                 scanned_count=scanned_count,
                 imported_count=imported_count,
                 created_count=0 if outcome is None else outcome.created_count,
-                updated_count=0 if outcome is None else outcome.updated_count,
+                updated_count=(0 if outcome is None else outcome.updated_count) + repaired_count,
                 unchanged_count=0 if outcome is None else outcome.unchanged_count,
                 skipped_count=skipped_count,
                 error_count=error_count,
@@ -566,21 +604,42 @@ class WatchedFolderService:
         record: WatchedFolderRecord,
         source_path: Path,
     ) -> tuple[list[PendingWatchedFile], int, int]:
+        pending_files, _, scanned_count, skipped_count = self._collect_watched_file_actions(
+            record,
+            source_path,
+            detect_source_tag_repairs=False,
+        )
+        return pending_files, scanned_count, skipped_count
+
+    def _collect_sync_actions(
+        self,
+        record: WatchedFolderRecord,
+        source_path: Path,
+    ) -> tuple[list[PendingWatchedFile], dict[str, list[str]], int, int]:
+        return self._collect_watched_file_actions(
+            record,
+            source_path,
+            detect_source_tag_repairs=True,
+        )
+
+    def _collect_watched_file_actions(
+        self,
+        record: WatchedFolderRecord,
+        source_path: Path,
+        *,
+        detect_source_tag_repairs: bool,
+    ) -> tuple[list[PendingWatchedFile], dict[str, list[str]], int, int]:
         existing_documents = load_json_documents(self._settings.docstore_json_path)
-        existing_upload_keys = {
-            document.upload_key
-            for document in existing_documents
-            if document.upload_key
-        }
-        existing_document_by_watch_path: dict[str, DocumentRecord] = {}
+        existing_documents_by_watch_path: dict[str, list[DocumentRecord]] = {}
         for document in existing_documents:
             if not document.upload_key:
                 continue
             watch_path_key = self._watch_path_key_from_upload_key(document.upload_key)
             if watch_path_key:
-                existing_document_by_watch_path[watch_path_key] = document
+                existing_documents_by_watch_path.setdefault(watch_path_key, []).append(document)
 
         pending_files: list[PendingWatchedFile] = []
+        source_tag_repairs: dict[str, list[str]] = {}
         scanned_count = 0
         skipped_count = 0
         for path in self._iter_supported_files(source_path, recursive=record.recursive):
@@ -596,16 +655,39 @@ class WatchedFolderService:
                 watch_id=record.watch_id,
                 relative_path=relative_path,
             )
-            existing_document = existing_document_by_watch_path.get(watch_path_key)
+            existing_documents_for_path = existing_documents_by_watch_path.get(
+                watch_path_key,
+                [],
+            )
+            matching_documents = [
+                document
+                for document in existing_documents_for_path
+                if self._upload_key_matches_file_version(document.upload_key, upload_key)
+            ]
+            existing_document = matching_documents[-1] if matching_documents else (
+                existing_documents_for_path[-1]
+                if existing_documents_for_path
+                else None
+            )
             expected_source_auto_tags = self._build_watched_auto_tags(record, path)
-            source_tags_are_current = (
-                existing_document is not None
-                and self._tags_match(
-                    self._source_auto_tags(existing_document),
+            stale_matching_documents = [
+                document
+                for document in matching_documents
+                if not self._tags_match(
+                    self._source_auto_tags(document),
                     expected_source_auto_tags,
                 )
-            )
-            if upload_key in existing_upload_keys and source_tags_are_current:
+            ]
+            if matching_documents and not stale_matching_documents:
+                skipped_count += 1
+                continue
+            if matching_documents and detect_source_tag_repairs:
+                source_tag_repairs.update(
+                    {
+                        document.document_id: expected_source_auto_tags
+                        for document in stale_matching_documents
+                    }
+                )
                 skipped_count += 1
                 continue
 
@@ -626,7 +708,7 @@ class WatchedFolderService:
                 )
             )
 
-        return pending_files, scanned_count, skipped_count
+        return pending_files, source_tag_repairs, scanned_count, skipped_count
 
     def _build_upload(
         self,
@@ -1087,6 +1169,15 @@ class WatchedFolderService:
         payload = payload.split("::item:", 1)[0]
         payload = payload.split("::mtime:", 1)[0]
         return payload or None
+
+    def _upload_key_matches_file_version(
+        self,
+        upload_key: str | None,
+        expected_upload_key: str,
+    ) -> bool:
+        if not upload_key:
+            return False
+        return upload_key.split("::item:", 1)[0] == expected_upload_key
 
     def _watch_relative_path_from_upload_key(
         self,

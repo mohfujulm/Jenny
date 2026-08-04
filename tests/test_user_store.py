@@ -1,3 +1,5 @@
+"""Cover account validation, legacy migration, password hashing, and sessions."""
+
 from __future__ import annotations
 
 from contextlib import closing

@@ -1,3 +1,10 @@
+"""Use a vision model to describe PDF pages whose meaning is mainly visual.
+
+Native text and local OCR remain the primary extraction paths.  This analyzer is
+reserved for selected charts, diagrams, and image-heavy pages, batching them to
+control request size and returning page-number keyed descriptions.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -10,6 +17,7 @@ from typing import Any
 from openai import OpenAI
 
 from app.config import Settings
+from app.openai_usage import record_openai_usage, response_has_usage
 
 
 logger = logging.getLogger("app.pdf_ingestion")
@@ -17,6 +25,7 @@ logger = logging.getLogger("app.pdf_ingestion")
 
 @dataclass(frozen=True)
 class PdfVisionPage:
+    """Rendered page image and any text already recovered by cheaper methods."""
     page_number: int
     image_bytes: bytes
     native_text: str = ""
@@ -24,6 +33,7 @@ class PdfVisionPage:
 
 
 class PdfVisionAnalyzer:
+    """Batch selected page images through the configured multimodal model."""
     def __init__(
         self,
         settings: Settings,
@@ -96,17 +106,54 @@ class PdfVisionAnalyzer:
                 }
             )
 
-        response = self.client.responses.create(
-            model=self._settings.pdf_vision_model,
-            input=[{"role": "user", "content": content}],
-            reasoning={"effort": "low"},
-            text={"verbosity": "low"},
-            store=self._settings.openai_store_responses,
-        )
-        return self._parse_response(
-            getattr(response, "output_text", ""),
-            expected_page_numbers={page.page_number for page in pages},
-        )
+        model = self._settings.pdf_vision_model
+        try:
+            response = self.client.responses.create(
+                model=model,
+                input=[{"role": "user", "content": content}],
+                reasoning={"effort": "low"},
+                text={"verbosity": "low"},
+                store=self._settings.openai_store_responses,
+            )
+        except Exception as exc:
+            record_openai_usage(
+                operation="responses.create",
+                purpose="pdf_vision",
+                model=model,
+                error=exc,
+                item_count=len(pages),
+                page_count=len(pages),
+            )
+            raise
+
+        try:
+            parsed = self._parse_response(
+                getattr(response, "output_text", ""),
+                expected_page_numbers={page.page_number for page in pages},
+            )
+        except Exception as exc:
+            if response_has_usage(response):
+                record_openai_usage(
+                    operation="responses.create",
+                    purpose="pdf_vision",
+                    model=model,
+                    response=response,
+                    error=exc,
+                    item_count=len(pages),
+                    page_count=len(pages),
+                )
+            raise
+
+        if response_has_usage(response):
+            record_openai_usage(
+                operation="responses.create",
+                purpose="pdf_vision",
+                model=model,
+                response=response,
+                item_count=len(pages),
+                page_count=len(pages),
+            )
+        return parsed
 
     @staticmethod
     def _parse_response(

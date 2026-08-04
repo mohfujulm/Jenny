@@ -1,3 +1,10 @@
+"""Load and validate application configuration.
+
+Settings come from process environment variables, with a project-level ``.env``
+file supplying only values that are not already present.  ``get_settings`` is
+cached so every service observes one consistent configuration snapshot.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _load_dotenv_file() -> None:
+    """Apply simple ``KEY=VALUE`` entries from ``.env`` without overriding the OS."""
     dotenv_path = ROOT_DIR / ".env"
     if not dotenv_path.exists():
         return
@@ -26,18 +34,21 @@ def _load_dotenv_file() -> None:
 
 
 def _to_bool(value: str | None, default: bool) -> bool:
+    """Convert common truthy strings while preserving a caller-supplied default."""
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _to_int(value: str | None, default: int) -> int:
+    """Parse an integer or use ``default`` when the variable is absent/invalid."""
     if value is None:
         return default
     return int(value)
 
 
 def _to_optional_int(value: str | None) -> int | None:
+    """Parse an optional integer; blank and invalid values mean "not configured"."""
     if value is None:
         return None
     normalized = value.strip()
@@ -51,6 +62,7 @@ _load_dotenv_file()
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable-in-practice configuration shared by all application services."""
     app_title: str
     openai_api_key: str | None
     openai_standard_model: str
@@ -65,6 +77,7 @@ class Settings:
     default_admin_username: str
     default_admin_display_name: str
     default_admin_password: str
+    saved_conversations_database_path: Path
     saved_conversations_path: Path
     docstore_backend: str
     docstore_json_path: Path
@@ -84,6 +97,16 @@ class Settings:
     semantic_embedding_batch_size: int
     chat_request_timeout_seconds: int
     chat_max_tool_rounds: int
+    chat_history_max_messages: int
+    chat_history_max_chars: int
+    chat_memory_enabled: bool
+    chat_memory_max_chars: int
+    chat_memory_max_turns: int
+    chat_tool_document_max_chars: int
+    chat_max_input_budget: int
+    chat_image_budget_units: int
+    chat_max_output_tokens: int
+    document_generation_max_output_tokens: int
     openai_request_timeout_seconds: int
     source_download_timeout_seconds: int
     source_download_max_attempts: int
@@ -105,10 +128,13 @@ class Settings:
     pdf_vision_dpi: int = 144
     pdf_vision_max_dimension: int = 1800
     pdf_vision_timeout_seconds: int = 60
+    pdf_extraction_cache_enabled: bool = True
+    pdf_extraction_cache_path: Path = ROOT_DIR / "app/data/pdf_extraction_cache"
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Build the process-wide settings object on first use."""
     return Settings(
         app_title=os.getenv("APP_TITLE", "Team Knowledge Agent"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
@@ -142,7 +168,14 @@ def get_settings() -> Settings:
             "DEFAULT_ADMIN_PASSWORD",
             "Administrator!1",
         ),
-        saved_conversations_path=ROOT_DIR / os.getenv("SAVED_CONVERSATIONS_PATH", "app/data/saved_conversations.json"),
+        saved_conversations_database_path=ROOT_DIR / os.getenv(
+            "SAVED_CONVERSATIONS_DATABASE_PATH",
+            "app/data/saved_conversations.sqlite",
+        ),
+        saved_conversations_path=ROOT_DIR / os.getenv(
+            "SAVED_CONVERSATIONS_PATH",
+            "app/data/saved_conversations.json",
+        ),
         docstore_backend=os.getenv("DOCSTORE_BACKEND", "json").strip().lower(),
         docstore_json_path=ROOT_DIR / os.getenv("DOCSTORE_JSON_PATH", "app/data/sample_documents.json"),
         docstore_folders_path=ROOT_DIR / os.getenv("DOCSTORE_FOLDERS_PATH", "app/data/library_folders.json"),
@@ -171,6 +204,14 @@ def get_settings() -> Settings:
         pdf_vision_dpi=_to_int(os.getenv("PDF_VISION_DPI"), 144),
         pdf_vision_max_dimension=_to_int(os.getenv("PDF_VISION_MAX_DIMENSION"), 1800),
         pdf_vision_timeout_seconds=_to_int(os.getenv("PDF_VISION_TIMEOUT_SECONDS"), 60),
+        pdf_extraction_cache_enabled=_to_bool(
+            os.getenv("PDF_EXTRACTION_CACHE_ENABLED"),
+            True,
+        ),
+        pdf_extraction_cache_path=ROOT_DIR / os.getenv(
+            "PDF_EXTRACTION_CACHE_PATH",
+            "app/data/pdf_extraction_cache",
+        ),
         docstore_base_url=os.getenv("DOCSTORE_BASE_URL", "http://localhost:8081").rstrip("/"),
         docstore_api_key=os.getenv("DOCSTORE_API_KEY"),
         docstore_timeout_seconds=_to_int(os.getenv("DOCSTORE_TIMEOUT_SECONDS"), 15),
@@ -191,7 +232,44 @@ def get_settings() -> Settings:
             os.getenv("CHAT_REQUEST_TIMEOUT_SECONDS"),
             120,
         ),
-        chat_max_tool_rounds=_to_int(os.getenv("CHAT_MAX_TOOL_ROUNDS"), 5),
+        chat_max_tool_rounds=_to_int(os.getenv("CHAT_MAX_TOOL_ROUNDS"), 3),
+        chat_history_max_messages=_to_int(
+            os.getenv("CHAT_HISTORY_MAX_MESSAGES"),
+            8,
+        ),
+        chat_history_max_chars=_to_int(
+            os.getenv("CHAT_HISTORY_MAX_CHARS"),
+            16_000,
+        ),
+        chat_memory_enabled=_to_bool(os.getenv("CHAT_MEMORY_ENABLED"), True),
+        chat_memory_max_chars=_to_int(
+            os.getenv("CHAT_MEMORY_MAX_CHARS"),
+            4_000,
+        ),
+        chat_memory_max_turns=_to_int(
+            os.getenv("CHAT_MEMORY_MAX_TURNS"),
+            4,
+        ),
+        chat_tool_document_max_chars=_to_int(
+            os.getenv("CHAT_TOOL_DOCUMENT_MAX_CHARS"),
+            6_000,
+        ),
+        chat_max_input_budget=_to_int(
+            os.getenv("CHAT_MAX_INPUT_BUDGET"),
+            48_000,
+        ),
+        chat_image_budget_units=_to_int(
+            os.getenv("CHAT_IMAGE_BUDGET_UNITS"),
+            4_096,
+        ),
+        chat_max_output_tokens=_to_int(
+            os.getenv("CHAT_MAX_OUTPUT_TOKENS"),
+            3_000,
+        ),
+        document_generation_max_output_tokens=_to_int(
+            os.getenv("DOCUMENT_GENERATION_MAX_OUTPUT_TOKENS"),
+            6_000,
+        ),
         openai_request_timeout_seconds=_to_int(
             os.getenv("OPENAI_REQUEST_TIMEOUT_SECONDS"),
             60,

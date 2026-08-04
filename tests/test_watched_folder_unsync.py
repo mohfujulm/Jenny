@@ -1,3 +1,5 @@
+"""Verify unsynchronizing watchers preserves or removes library data as requested."""
+
 from __future__ import annotations
 
 from dataclasses import replace

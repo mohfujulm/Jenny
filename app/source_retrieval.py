@@ -1,3 +1,10 @@
+"""Safely download public HTTPS PDF sources for chat retrieval.
+
+Every redirect is validated and private, loopback, link-local, and otherwise
+non-public IP addresses are rejected.  Those checks are the SSRF boundary that
+prevents a user-supplied URL from reaching services on the local network.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +25,7 @@ _MAX_REDIRECTS = 5
 
 @dataclass(frozen=True)
 class RetrievedSourceDocument:
+    """Validated PDF bytes plus the final URL and download metadata."""
     filename: str
     mime_type: str
     content_bytes: bytes
@@ -25,6 +33,7 @@ class RetrievedSourceDocument:
 
 
 class SourceDocumentRetriever:
+    """Bounded HTTP retriever that permits only public HTTPS PDF responses."""
     def __init__(
         self,
         *,

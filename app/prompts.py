@@ -1,3 +1,9 @@
+"""Central prompt policy for grounded and broader chat modes.
+
+The long constants define durable assistant behavior.  The builder functions
+append request-specific source scope without mutating those shared templates.
+"""
+
 from __future__ import annotations
 
 from app.models import SourceMode
@@ -56,6 +62,7 @@ In this mode:
 
 
 def build_system_prompt(source_mode: SourceMode) -> str:
+    """Select the base policy for internal-document or broader-knowledge chat."""
     return f"{BASE_SYSTEM_PROMPT}\n\n{MODE_PROMPTS[source_mode]}"
 
 
@@ -64,6 +71,7 @@ def build_context_scope_prompt(
     document_ids: list[str],
     source_mode: SourceMode = "internal",
 ) -> str:
+    """Describe the exact folder/document scope the retrieval tools must honor."""
     if not folder_ids and not document_ids:
         if source_mode == "broader":
             return (

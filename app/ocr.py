@@ -1,3 +1,10 @@
+"""Pluggable local OCR providers used during document ingestion.
+
+Tesseract shells out to an installed executable, while RapidOCR is loaded lazily
+from its Python package.  Lazy initialization keeps normal text uploads fast and
+lets the health endpoint explain missing optional OCR dependencies cleanly.
+"""
+
 from __future__ import annotations
 
 import importlib.util
@@ -18,6 +25,7 @@ WHITESPACE_RE = re.compile(r"\s+")
 
 
 class OcrProvider(Protocol):
+    """Common interface implemented by all local image-to-text engines."""
     name: str
 
     def recognize(
@@ -30,6 +38,7 @@ class OcrProvider(Protocol):
 
 
 class TesseractOcrProvider:
+    """OCR adapter around the Tesseract command-line program."""
     name = "tesseract"
 
     def __init__(
@@ -99,6 +108,7 @@ class TesseractOcrProvider:
 
 
 class RapidOcrProvider:
+    """Lazily initialized adapter around the in-process RapidOCR engine."""
     name = "rapidocr"
 
     def __init__(
@@ -164,6 +174,7 @@ class RapidOcrProvider:
 
 
 def create_ocr_provider(settings: Settings) -> OcrProvider:
+    """Construct the configured provider or raise a useful configuration error."""
     engine = normalize_ocr_engine(getattr(settings, "pdf_ocr_engine", "tesseract"))
     if engine == "tesseract":
         return TesseractOcrProvider(
@@ -179,6 +190,7 @@ def create_ocr_provider(settings: Settings) -> OcrProvider:
 
 
 def get_ocr_runtime_status(settings: Settings) -> dict[str, object]:
+    """Report whether the selected OCR runtime is available without running OCR."""
     enabled = bool(getattr(settings, "pdf_ocr_enabled", True))
     engine = normalize_ocr_engine(getattr(settings, "pdf_ocr_engine", "tesseract"))
     if not enabled:

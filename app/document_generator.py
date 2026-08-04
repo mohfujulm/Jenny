@@ -1,3 +1,11 @@
+"""Generate downloadable TXT, DOCX, PDF, and XLSX files from library context.
+
+The service first retrieves supporting documents, asks the model for structured
+content, appends traceable sources, and renders the requested binary format in
+memory.  The low-level XML builders intentionally avoid requiring desktop Office
+software on the server.
+"""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -28,6 +36,7 @@ from reportlab.platypus import (
 from app.config import Settings
 from app.datastore import BaseDocumentStore, DocumentRecord, RetrievalContext
 from app.models import Citation, ContextFilter, GeneratedDocumentFormat, ReasoningMode, SourceMode
+from app.openai_usage import record_openai_usage, response_has_usage
 from app.prompts import build_context_scope_prompt, build_system_prompt
 from app.reasoning_profiles import get_chat_reasoning_profile
 
@@ -39,12 +48,15 @@ PDF_MIME_TYPE = "application/pdf"
 SOURCE_SHEET_NAME = "Sources"
 DEFAULT_TEXT_DOCUMENT_NAME = "generated-document"
 DEFAULT_WORKBOOK_NAME = "generated-workbook"
+MAX_SUPPORTING_DOCUMENTS = 3
+MAX_SUPPORTING_DOCUMENT_CHARS = 4_000
 SPREADSHEET_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_DOCUMENT_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 @dataclass(frozen=True)
 class GeneratedDocumentResult:
+    """Generated file bytes plus download metadata and source citations."""
     filename: str
     mime_type: str
     content_bytes: bytes
@@ -53,6 +65,7 @@ class GeneratedDocumentResult:
 
 
 class ContextDocumentGenerator:
+    """Retrieve evidence, draft content, and serialize it to the requested format."""
     def __init__(self, settings: Settings, document_store: BaseDocumentStore) -> None:
         self._settings = settings
         self._document_store = document_store
@@ -63,7 +76,14 @@ class ContextDocumentGenerator:
         if not self._settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
         if self._client is None:
-            self._client = OpenAI(api_key=self._settings.openai_api_key)
+            self._client = OpenAI(
+                api_key=self._settings.openai_api_key,
+                timeout=max(
+                    1,
+                    int(getattr(self._settings, "openai_request_timeout_seconds", 60)),
+                ),
+                max_retries=0,
+            )
         return self._client
 
     def generate_document(
@@ -75,6 +95,9 @@ class ContextDocumentGenerator:
         source_mode: SourceMode,
         reasoning_mode: ReasoningMode = "standard",
         context_filter: ContextFilter,
+        supporting_document_ids: list[str] | None = None,
+        client: OpenAI | None = None,
+        timeout_seconds: float | None = None,
     ) -> GeneratedDocumentResult:
         normalized_instructions = str(instructions or "").strip()
         if not normalized_instructions:
@@ -89,10 +112,18 @@ class ContextDocumentGenerator:
             raise ValueError(
                 "Select Context: Internal or choose a library scope before generating from internal documents."
             )
-        supporting_documents, citations = self._collect_supporting_documents(
-            query=f"{normalized_title}\n{normalized_instructions}".strip(),
-            retrieval_context=retrieval_context,
-        )
+        supporting_documents: list[DocumentRecord] = []
+        citations: list[Citation] = []
+        if supporting_document_ids:
+            supporting_documents, citations = self._load_supporting_documents(
+                document_ids=supporting_document_ids,
+                retrieval_context=retrieval_context,
+            )
+        if not supporting_documents:
+            supporting_documents, citations = self._collect_supporting_documents(
+                query=f"{normalized_title}\n{normalized_instructions}".strip(),
+                retrieval_context=retrieval_context,
+            )
         if not supporting_documents:
             raise ValueError(
                 "No relevant indexed documents were found in the current library scope for this request."
@@ -107,6 +138,8 @@ class ContextDocumentGenerator:
                 retrieval_context=retrieval_context,
                 supporting_documents=supporting_documents,
                 citations=citations,
+                client=client,
+                timeout_seconds=timeout_seconds,
             )
             filename = self._build_download_filename(normalized_title, output_format)
             return GeneratedDocumentResult(
@@ -126,6 +159,8 @@ class ContextDocumentGenerator:
             retrieval_context=retrieval_context,
             supporting_documents=supporting_documents,
             citations=citations,
+            client=client,
+            timeout_seconds=timeout_seconds,
         )
         filename = self._build_download_filename(normalized_title, output_format)
         if output_format == "docx":
@@ -154,7 +189,7 @@ class ContextDocumentGenerator:
     ) -> tuple[list[DocumentRecord], list[Citation]]:
         hits = self._document_store.search_documents(
             query=query,
-            limit=6,
+            limit=MAX_SUPPORTING_DOCUMENTS,
             context=retrieval_context,
             search_profile="answer",
         )
@@ -178,7 +213,7 @@ class ContextDocumentGenerator:
                 continue
             seen_document_ids.add(document.document_id)
             documents.append(document)
-            if len(documents) >= 4:
+            if len(documents) >= MAX_SUPPORTING_DOCUMENTS:
                 break
 
         if documents:
@@ -214,10 +249,45 @@ class ContextDocumentGenerator:
                     source_url=document.source_url,
                 ),
             )
-            if len(documents) >= 4:
+            if len(documents) >= MAX_SUPPORTING_DOCUMENTS:
                 break
 
         return documents, list(citations.values())
+
+    def _load_supporting_documents(
+        self,
+        *,
+        document_ids: list[str],
+        retrieval_context: RetrievalContext,
+    ) -> tuple[list[DocumentRecord], list[Citation]]:
+        """Reuse documents the chat already selected without another embedding query."""
+        documents: list[DocumentRecord] = []
+        citations: list[Citation] = []
+        seen_document_ids: set[str] = set()
+        for item in document_ids:
+            document_id = str(item or "").strip()
+            if not document_id or document_id in seen_document_ids:
+                continue
+            seen_document_ids.add(document_id)
+            document = self._document_store.get_document(
+                document_id,
+                context=retrieval_context,
+            )
+            if document is None:
+                continue
+            documents.append(document)
+            citations.append(
+                Citation(
+                    document_id=document.document_id,
+                    title=document.title,
+                    category=document.category,
+                    excerpt=document.summary,
+                    source_url=document.source_url,
+                )
+            )
+            if len(documents) >= MAX_SUPPORTING_DOCUMENTS:
+                break
+        return documents, citations
 
     def _generate_text_document(
         self,
@@ -230,9 +300,11 @@ class ContextDocumentGenerator:
         retrieval_context: RetrievalContext,
         supporting_documents: list[DocumentRecord],
         citations: list[Citation],
+        client: OpenAI | None = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         context_payload = [
-            document.to_tool_payload(max_chars=5000)
+            document.to_tool_payload(max_chars=MAX_SUPPORTING_DOCUMENT_CHARS)
             for document in supporting_documents
         ]
         request = self._build_model_request(
@@ -254,7 +326,13 @@ class ContextDocumentGenerator:
                 "supporting_documents": context_payload,
             },
         )
-        response = self.client.responses.create(**request)
+        response = self._create_attributed_response(
+            request,
+            purpose=f"document_generation_{output_format}",
+            item_count=len(supporting_documents),
+            client=client,
+            timeout_seconds=timeout_seconds,
+        )
         generated_text = response.output_text.strip()
         if not generated_text:
             raise RuntimeError("The model returned an empty document.")
@@ -271,9 +349,11 @@ class ContextDocumentGenerator:
         retrieval_context: RetrievalContext,
         supporting_documents: list[DocumentRecord],
         citations: list[Citation],
+        client: OpenAI | None = None,
+        timeout_seconds: float | None = None,
     ) -> bytes:
         context_payload = [
-            document.to_tool_payload(max_chars=4500)
+            document.to_tool_payload(max_chars=MAX_SUPPORTING_DOCUMENT_CHARS)
             for document in supporting_documents
         ]
         request = self._build_model_request(
@@ -297,7 +377,13 @@ class ContextDocumentGenerator:
                 "supporting_documents": context_payload,
             },
         )
-        response = self.client.responses.create(**request)
+        response = self._create_attributed_response(
+            request,
+            purpose="document_generation_xlsx",
+            item_count=len(supporting_documents),
+            client=client,
+            timeout_seconds=timeout_seconds,
+        )
         workbook_payload = self._parse_workbook_payload(response.output_text)
         workbook_title, sheets = self._normalize_workbook_payload(workbook_payload, fallback_title=title)
         sheets = [*sheets, self._build_sources_sheet(citations)]
@@ -328,11 +414,51 @@ class ContextDocumentGenerator:
             ),
             "reasoning": {"effort": reasoning_profile["effort"]},
             "text": {"verbosity": self._settings.openai_text_verbosity},
+            "max_output_tokens": max(
+                512,
+                int(getattr(self._settings, "document_generation_max_output_tokens", 6_000)),
+            ),
             "store": self._settings.openai_store_responses,
         }
         if not self._settings.openai_store_responses:
             request["include"] = ["reasoning.encrypted_content"]
         return request
+
+    def _create_attributed_response(
+        self,
+        request: dict[str, Any],
+        *,
+        purpose: str,
+        item_count: int,
+        client: OpenAI | None = None,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        """Create one model response and record only its billing metadata."""
+        model = str(request.get("model") or "unknown")
+        try:
+            active_client = client or self.client
+            active_request = dict(request)
+            if timeout_seconds is not None:
+                active_request["timeout"] = max(1, timeout_seconds)
+            response = active_client.responses.create(**active_request)
+        except Exception as exc:
+            record_openai_usage(
+                operation="responses.create",
+                purpose=purpose,
+                model=model,
+                error=exc,
+                item_count=item_count,
+            )
+            raise
+        if response_has_usage(response):
+            record_openai_usage(
+                operation="responses.create",
+                purpose=purpose,
+                model=model,
+                response=response,
+                item_count=item_count,
+            )
+        return response
 
     def _append_sources_section(self, body: str, citations: list[Citation]) -> str:
         if not citations:

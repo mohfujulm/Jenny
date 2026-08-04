@@ -1,3 +1,4 @@
+# Local deployment with persistent library/index data and generated downloads.
 services:
   app:
     build:
@@ -11,6 +12,7 @@ services:
     environment:
       PDF_OCR_ENGINE: ${PDF_OCR_ENGINE:-tesseract}
     volumes:
+      # Named volumes survive container replacement and avoid host-specific paths.
       - app-data:/app/app/data
       - app-outputs:/app/outputs
     restart: unless-stopped

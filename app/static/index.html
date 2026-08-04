@@ -8,7 +8,9 @@
     <link rel="stylesheet" href="{{APP_CSS_URL}}">
   </head>
   <body>
+    <!-- Primary application shell: persistent history/scope sidebar plus chat. -->
     <div class="shell">
+      <!-- Conversation creation, search, saved conversations, and selected context from database summary pane. -->
       <aside class="sidebar">
         <div class="brand sidebar-brand">
           <div>
@@ -41,7 +43,7 @@
 
         <div class="panel conversation-panel">
           <div class="panel-head conversation-panel-head">
-            <h2>Recents</h2>
+            <h2>Saved Conversations</h2>
             <span class="autosave-pill">Autosaves</span>
             <button id="saveConversationButton" class="ghost-button is-hidden" type="button">Save current</button>
           </div>
@@ -63,7 +65,10 @@
 
       </aside>
 
+      <!-- Main assistant-chat pane -->
       <main class="chat-stage">
+
+        <!-- In chat settings control pane:  user login, context (internal doc only/web search lookup) control, reasoning control (5.6 Luna / 5.6 Terra) -->
         <div class="chat-mode-controls" aria-label="Chat settings">
           <button
             id="userLoginBadge"
@@ -146,6 +151,7 @@
       </main>
     </div>
 
+    <!-- Positioned action menu populated for the selected saved conversation. -->
     <div id="savedConversationContextMenu" class="saved-conversation-context-menu is-hidden" aria-hidden="true">
       <button id="savedConversationRenameButton" class="saved-conversation-context-menu-item" type="button">
         Rename conversation
@@ -155,6 +161,7 @@
       </button>
     </div>
 
+    <!-- Authentication modal switches among sign-in, sign-up, account, and password views. -->
     <div id="userManagementModal" class="user-management-modal is-hidden" aria-hidden="true">
       <div
         id="userManagementBackdrop"
@@ -267,6 +274,7 @@
       </section>
     </div>
 
+    <!-- JavaScript clones this semantic skeleton for every transcript message. -->
     <template id="messageTemplate">
       <article class="message">
         <div class="message-meta"></div>
@@ -275,6 +283,7 @@
       </article>
     </template>
 
+    <!-- Library workspace: retrieval scope, imports, explorer, editor, and preview. -->
     <div id="documentBrowser" class="browser-modal is-hidden" aria-hidden="true">
       <div class="browser-backdrop" data-close-browser></div>
       <div class="browser-dialog" role="dialog" aria-modal="true" aria-labelledby="browserTitle">
@@ -288,6 +297,7 @@
         </div>
 
         <div id="browserBody" class="browser-body">
+          <!-- Left pane controls what internal content future chat turns may retrieve. -->
           <section class="browser-scope">
             <div class="browser-pane-head">
               <p class="eyebrow">Scope</p>
@@ -469,6 +479,7 @@
 
           </section>
 
+          <!-- Right pane manages the actual folder/document collection. -->
           <section class="browser-library">
             <div class="browser-library-header">
               <div>
@@ -683,6 +694,7 @@
             </div>
           </section>
 
+          <!-- Preview is kept outside the editor card so it can expand independently. -->
           <section id="browserPreviewPanel" class="browser-preview">
             <header class="preview-panel-head">
               <div class="preview-panel-copy">
@@ -739,6 +751,7 @@
             data-close-synchronized-paths
             aria-label="Close synchronized paths"
           ></button>
+          <!-- Nested modal for creating, editing, syncing, and removing filesystem watchers. -->
           <section
             class="synchronized-paths-dialog"
             role="dialog"

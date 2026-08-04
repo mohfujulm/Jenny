@@ -1,3 +1,5 @@
+"""Test network-probe classification for success, HTTP errors, and outages."""
+
 from __future__ import annotations
 
 from unittest.mock import patch

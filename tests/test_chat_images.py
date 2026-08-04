@@ -1,3 +1,5 @@
+"""Cover image validation, model input conversion, and conversation persistence."""
+
 from __future__ import annotations
 
 import base64
@@ -54,7 +56,7 @@ class ChatImageTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     ChatImage(**values)
 
-    def test_saved_images_restore_into_multimodal_model_history(self) -> None:
+    def test_saved_images_load_lazily_without_duplicate_model_history(self) -> None:
         with TemporaryDirectory() as directory:
             store = SavedConversationStore(
                 Path(directory) / "saved_conversations.json",
@@ -82,13 +84,7 @@ class ChatImageTests(unittest.TestCase):
             restored = restored_manager.get_or_create("image-chat", "owner-id")
 
             self.assertEqual(restored.transcript[0].images[0].filename, "panel.png")
-            self.assertEqual(restored.history[0]["content"][0]["type"], "input_text")
-            self.assertEqual(restored.history[0]["content"][1]["type"], "input_image")
-            self.assertTrue(
-                restored.history[0]["content"][1]["image_url"].startswith(
-                    "data:image/png;base64,"
-                )
-            )
+            self.assertEqual(restored.history, [])
 
 
 if __name__ == "__main__":

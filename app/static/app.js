@@ -1,3 +1,13 @@
+/*
+ * Ask Jenny browser application.
+ *
+ * This is a dependency-free, single-page UI. The central `state` object is the
+ * client-side source of truth; event handlers update it, render functions project
+ * it into the DOM, and async functions synchronize it with FastAPI. Keeping those
+ * three roles distinct is the key to following this otherwise large file.
+ */
+
+// Human-readable policy text for the two server-side source modes.
 const modeCopy = {
   internal: {
     description: "Prioritizes internal documents and avoids filling gaps with general knowledge.",
@@ -144,6 +154,8 @@ const state = {
   },
 };
 
+// Browser-session heartbeat -------------------------------------------------
+// The desktop launcher uses these pings to know whether any UI tabs remain open.
 async function heartbeatUiSession() {
   try {
     await fetch(`/api/ui-sessions/${encodeURIComponent(uiSessionId)}`, {
@@ -389,6 +401,8 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
   ".xltm",
   ".xltx",
 ]);
+// Upload parsing and duplicate resolution ----------------------------------
+// Binary Office/PDF formats must be base64 encoded before entering JSON.
 const BINARY_UPLOAD_EXTENSIONS = new Set([
   ".docm",
   ".docx",
@@ -781,6 +795,8 @@ function collectSimilarUploadResolutions(conflicts) {
   return resolutions;
 }
 
+// Conversation-local preferences -------------------------------------------
+// Preferences and scroll positions survive reloads in bounded localStorage maps.
 function cloneContextFilter(filter) {
   return {
     folderIds: [...filter.folderIds],
@@ -1342,6 +1358,8 @@ function getFolderDocuments(folderId) {
     .sort((left, right) => getDocumentDisplayLabel(left).localeCompare(getDocumentDisplayLabel(right)));
 }
 
+// Library tree interaction --------------------------------------------------
+// Drag payloads live in state as a fallback for browsers with restricted MIME data.
 function setExplorerDragData(event, payload) {
   state.library.dragPayload = payload;
   if (!event.dataTransfer) {
@@ -1705,6 +1723,7 @@ function getVisibleDocuments() {
     });
 }
 
+// Authentication and account UI --------------------------------------------
 function getDocumentKindLabel(documentLike) {
   const candidates = [documentLike.title, documentLike.document_id];
   for (const candidate of candidates) {
@@ -1716,8 +1735,15 @@ function getDocumentKindLabel(documentLike) {
   return String(documentLike.category || "DOC").slice(0, 6).toUpperCase();
 }
 
+function canManageLibrary() {
+  return ["admin", "library_manager"].includes(state.auth.user?.role);
+}
+
 function canMutateLibrary() {
-  return state.library.backend === "json" || state.library.backend === "semantic";
+  return (
+    canManageLibrary() &&
+    (state.library.backend === "json" || state.library.backend === "semantic")
+  );
 }
 
 function stripGeneratedUploadCitations(value) {
@@ -1771,6 +1797,10 @@ function applyAuthenticationGate() {
     Boolean(state.auth.user) && !state.auth.user.must_change_password;
   newConversationButton.disabled = !authenticated;
   conversationSearchInput.disabled = !authenticated;
+  openLibraryButton.disabled = !authenticated;
+  if (openSynchronizedPathsButton) {
+    openSynchronizedPathsButton.disabled = !authenticated || !canManageLibrary();
+  }
   messageInput.placeholder = authenticated
     ? "Ask about policies, documents, onboarding, billing, support, or general questions."
     : "Sign in to start a private conversation.";
@@ -1788,6 +1818,32 @@ function clearConversationWorkspaceForAuth() {
   conversationSearchInput.value = "";
   resetConversation({ rememberCurrentScroll: false });
   applyAuthenticationGate();
+}
+
+function clearLibraryWorkspaceForAuth() {
+  closeDocumentBrowser();
+  state.library.backend = null;
+  state.library.totalDocuments = 0;
+  state.library.totalChunks = null;
+  state.library.folders = [];
+  state.library.documents = [];
+  state.library.loaded = false;
+  state.library.loadError = null;
+  state.library.activeFolderId = null;
+  state.library.searchQuery = "";
+  state.library.previewDocumentId = null;
+  state.library.previewCache = {};
+  state.library.deleteSelectionIds = [];
+  state.library.editorDocumentId = null;
+  state.library.watchFolders = [];
+  state.library.watchFoldersLoaded = false;
+  state.library.watchFoldersLoadError = null;
+  if (previewText) {
+    previewText.textContent = "";
+  }
+  if (folderPropertiesSource) {
+    folderPropertiesSource.textContent = "";
+  }
 }
 
 async function activateAuthenticatedConversationWorkspace() {
@@ -1898,6 +1954,7 @@ async function initializeAuthenticatedWorkspace() {
     await activateAuthenticatedConversationWorkspace();
   } else {
     clearConversationWorkspaceForAuth();
+    clearLibraryWorkspaceForAuth();
   }
 }
 
@@ -2003,6 +2060,7 @@ async function signOut() {
     state.auth.view = "signin";
     renderAuth();
     clearConversationWorkspaceForAuth();
+    clearLibraryWorkspaceForAuth();
     setUserManagementStatus(payload.message || "Signed out.", "success");
     signInPasswordInput.value = "";
     window.requestAnimationFrame(() => signInUsernameInput.focus());
@@ -2013,6 +2071,8 @@ async function signOut() {
   }
 }
 
+// Conversation normalization and rendering ---------------------------------
+// Normalization supports both current snake_case API data and older saved shapes.
 function normalizeConversationMessage(message) {
   const role = message && typeof message.role === "string" ? message.role : "assistant";
   const rawBody = typeof message.body === "string" ? message.body : "";
@@ -2392,6 +2452,8 @@ function reconcileLibraryState() {
   });
 }
 
+// Safe, deliberately small Markdown renderer -------------------------------
+// Escape raw HTML first, then introduce only the markup this UI supports.
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -2950,6 +3012,7 @@ function renderMessage(message, options = {}) {
   renderConversationSaveButton();
 }
 
+// In-flight request and progress indicators --------------------------------
 function hideResponsePreparationIndicator() {
   if (state.responseIndicatorTimer !== null) {
     window.clearInterval(state.responseIndicatorTimer);
@@ -3091,7 +3154,7 @@ function setWatchFolderState(isInFlight) {
     openSourceLocationButton,
   ].forEach((element) => {
     if (element) {
-      element.disabled = isInFlight;
+      element.disabled = isInFlight || !canManageLibrary();
     }
   });
   if (addWatchFolderButton) {
@@ -3110,6 +3173,7 @@ function setWatchFolderState(isInFlight) {
   renderDocumentEditor();
 }
 
+// Watched-folder synchronization UI ----------------------------------------
 function setWatchFolderStatus(message, tone = "neutral") {
   if (!watchFolderStatus) {
     return;
@@ -3172,6 +3236,7 @@ function renderWatchFolderList() {
   }
   if (librarySyncAllButton) {
     librarySyncAllButton.disabled =
+      !canManageLibrary() ||
       state.library.watchFolderInFlight ||
       !state.library.watchFoldersLoaded ||
       state.library.watchFolders.length === 0;
@@ -3292,6 +3357,13 @@ function renderWatchFolderList() {
 }
 
 async function loadWatchedFolders() {
+  if (!canManageLibrary()) {
+    state.library.watchFolders = [];
+    state.library.watchFoldersLoaded = true;
+    state.library.watchFoldersLoadError = null;
+    renderWatchFolderList();
+    return;
+  }
   try {
     const response = await fetch("/api/watch-folders");
     const payload = await parseJsonResponse(response);
@@ -3793,6 +3865,7 @@ async function deleteWatchedFolder(watchId) {
   }
 }
 
+// Document generation and library mutation controls ------------------------
 function setDocumentGenerationState(isGenerating) {
   state.generation.inFlight = isGenerating;
   [
@@ -4269,6 +4342,7 @@ function toggleDeleteSelection(documentId) {
   renderDocumentFileList();
 }
 
+// Saved-conversation memory -------------------------------------------------
 function closeSavedConversationContextMenu() {
   state.memory.contextMenu = {
     open: false,
@@ -4927,6 +5001,8 @@ async function loadDocumentLibrary() {
   }
 }
 
+// Library explorer rendering ------------------------------------------------
+// These renderers derive counts, breadcrumbs, tree rows, and files from state.
 function renderBrowserStats() {
   if (state.library.loadError) {
     browserStats.textContent = `Library unavailable: ${state.library.loadError}`;
@@ -6447,6 +6523,7 @@ async function createFolderFromContext(parentFolderId) {
   }
 }
 
+// Document preview and metadata editor -------------------------------------
 function renderPreviewSourceMedia(previewDoc) {
   previewSourceMedia.innerHTML = "";
   const imageUrl = previewDoc && isDirectImageUrl(previewDoc.source_url)
@@ -6541,13 +6618,26 @@ function renderPreview() {
   previewCard.classList.remove("is-hidden");
 }
 
+// Modal lifecycle and context-scope commit ---------------------------------
 function openDocumentBrowser() {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(openLibraryButton);
+    return;
+  }
   if (!state.library.loaded && !state.library.loadError) {
     state.library.collapseFoldersOnLoad = true;
     void loadDocumentLibrary();
   }
-  if (!state.library.watchFoldersLoaded && !state.library.watchFoldersLoadError) {
+  if (
+    canManageLibrary() &&
+    !state.library.watchFoldersLoaded &&
+    !state.library.watchFoldersLoadError
+  ) {
     void loadWatchedFolders();
+  } else if (!canManageLibrary()) {
+    state.library.watchFolders = [];
+    state.library.watchFoldersLoaded = true;
+    state.library.watchFoldersLoadError = null;
   }
   state.library.editorDismissed = false;
   closeExplorerContextMenu();

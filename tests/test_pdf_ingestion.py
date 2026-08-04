@@ -1,3 +1,5 @@
+"""Exercise native PDF text, OCR fallback, vision selection, and deduplication."""
+
 from __future__ import annotations
 
 import base64
