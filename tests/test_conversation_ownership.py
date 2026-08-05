@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app import main
+from tests.main_runtime import main
 from app.conversation_store import SavedConversationStore
 from app.models import ConversationMessage, ConversationSaveRequest
 from app.openai_agent import SessionManager

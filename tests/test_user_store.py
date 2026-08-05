@@ -91,6 +91,51 @@ class UserStoreTests(unittest.TestCase):
                 first.user_id,
             )
 
+    def test_default_administrator_bootstrap_preserves_existing_account_state(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "application.sqlite"
+            store = UserStore(database_path)
+            original = store.ensure_default_admin(
+                username="admin",
+                display_name="Administrator",
+                password="Administrator!1",
+            )
+            with closing(sqlite3.connect(database_path)) as connection:
+                original_password_hash = connection.execute(
+                    "SELECT password_hash FROM users WHERE user_id = ?",
+                    (original.user_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET display_name = 'Intentionally Demoted',
+                        role = 'member', is_active = 0,
+                        must_change_password = 0,
+                        updated_at = '2026-08-01T00:00:00+00:00'
+                    WHERE user_id = ?
+                    """,
+                    (original.user_id,),
+                )
+                connection.commit()
+
+            preserved = store.ensure_default_admin(
+                username="admin",
+                display_name="Configured Administrator",
+                password="DifferentPassword2",
+            )
+
+            self.assertEqual(preserved.display_name, "Intentionally Demoted")
+            self.assertEqual(preserved.role, "member")
+            self.assertFalse(preserved.is_active)
+            self.assertFalse(preserved.must_change_password)
+            self.assertEqual(preserved.updated_at, "2026-08-01T00:00:00+00:00")
+            with closing(sqlite3.connect(database_path)) as connection:
+                preserved_password_hash = connection.execute(
+                    "SELECT password_hash FROM users WHERE user_id = ?",
+                    (original.user_id,),
+                ).fetchone()[0]
+            self.assertEqual(preserved_password_hash, original_password_hash)
+
     def test_password_change_clears_first_login_requirement(self) -> None:
         with TemporaryDirectory() as directory:
             store = self._store(directory)

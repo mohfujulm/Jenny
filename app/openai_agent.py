@@ -232,7 +232,7 @@ SOURCE_RETRIEVAL_TOOL = {
 
 INLINE_CITATION_RE = re.compile(r"\[([A-Za-z0-9][A-Za-z0-9_-]*)\]")
 GENERATED_UPLOAD_CITATION_RE = re.compile(
-    r"[ \t]*\[UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]",
+    r"[ \t]*\[?UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]?",
     flags=re.IGNORECASE,
 )
 

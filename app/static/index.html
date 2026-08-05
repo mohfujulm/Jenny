@@ -39,6 +39,10 @@
             <span class="sidebar-nav-icon" aria-hidden="true">▤</span>
             Library
           </button>
+          <button id="openRoutinesButton" class="sidebar-nav-button" type="button">
+            <span class="sidebar-nav-icon" aria-hidden="true">↻</span>
+            Routines
+          </button>
         </nav>
 
         <div class="panel conversation-panel">
@@ -270,6 +274,80 @@
             <button id="forcedSignOutButton" class="ghost-button auth-sign-out-button is-hidden" type="button">Sign out instead</button>
           </form>
           <p id="userManagementStatus" class="user-management-status" aria-live="polite"></p>
+        </div>
+      </section>
+    </div>
+
+    <!-- Bounded scheduled tasks: one model request, internal scope only. -->
+    <div id="routinesModal" class="routines-modal is-hidden" aria-hidden="true">
+      <button id="routinesBackdrop" class="routines-backdrop" type="button" aria-label="Close routines"></button>
+      <section class="routines-dialog" role="dialog" aria-modal="true" aria-labelledby="routinesTitle">
+        <header class="routines-header">
+          <div>
+            <p class="eyebrow">Bounded scheduled work</p>
+            <h2 id="routinesTitle">Routines</h2>
+            <p class="mode-description">Each run uses one bounded Luna request and a fixed token ceiling. Global routines may use limited public web search.</p>
+          </div>
+          <button id="closeRoutinesButton" class="explorer-icon-button" type="button" aria-label="Close routines" title="Close">&times;</button>
+        </header>
+        <div class="routines-body">
+          <section class="routine-create-panel">
+            <div class="routine-section-head">
+              <div><p id="routineEditorEyebrow" class="eyebrow">New routine</p><h3 id="routineEditorHeading">Create a recurring task</h3></div>
+              <div class="routine-setup-controls">
+                <button id="resetRoutineEditorButton" class="ghost-button compact-button is-hidden" type="button">New routine</button>
+                <button id="routineSourceModeButton" class="source-mode-button" type="button" aria-pressed="false" aria-label="Context: Internal" title="Context: Internal is active. Click for Context: Global.">
+                  <span class="source-mode-indicator" aria-hidden="true"></span>
+                  <span id="routineSourceModeLabel">Context: Internal</span>
+                </button>
+                <span class="routine-guardrail-pill">1 request / run</span>
+              </div>
+            </div>
+            <form id="routineForm" class="routine-form">
+              <label class="field" for="routineNameInput">
+                <span class="field-label">Name</span>
+                <input id="routineNameInput" type="text" minlength="1" maxlength="100" required placeholder="Weekly project status">
+              </label>
+              <label class="field" for="routineInstructionsInput">
+                <span class="field-label">Instructions</span>
+                <textarea id="routineInstructionsInput" rows="5" minlength="1" maxlength="2000" required placeholder="Summarize changes, decisions, and unresolved items."></textarea>
+              </label>
+              <div class="routine-form-grid">
+                <label class="field" for="routineOutputSelect"><span class="field-label">Output</span><select id="routineOutputSelect"><option value="chat">Chat response</option><option value="pdf">PDF document</option><option value="docx">Word document</option></select></label>
+                <label class="field" for="routineScheduleSelect"><span class="field-label">Frequency</span><select id="routineScheduleSelect"><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label>
+                <label id="routineWeekdayField" class="field is-hidden" for="routineWeekdaySelect"><span class="field-label">Weekday</span><select id="routineWeekdaySelect"><option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option><option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option></select></label>
+                <label class="field" for="routineTimeInput"><span class="field-label">Local time</span><input id="routineTimeInput" type="time" value="09:00" required></label>
+              </div>
+              <div class="routine-scope-card">
+                <strong>Document scope</strong>
+                <p id="routineScopeSummary">No routine scope selected.</p>
+                <div id="routineScopeSelectionList" class="scope-item-list routine-scope-selection-list" aria-live="polite"></div>
+                <button id="routineScopePickerButton" class="ghost-button compact-button" type="button">Open Library to select scope</button>
+                <div id="routineScopePicker" class="routine-scope-picker is-hidden">
+                  <label class="visually-hidden" for="routineScopeSearchInput">Search routine scope</label>
+                  <input id="routineScopeSearchInput" type="search" maxlength="120" placeholder="Filter folders and files">
+                  <div class="routine-scope-picker-actions">
+                    <button id="clearRoutineScopeButton" class="ghost-button compact-button" type="button">Clear selection</button>
+                    <button id="closeRoutineScopePickerButton" class="secondary-button compact-button" type="button">Done</button>
+                  </div>
+                  <div id="routineScopePickerList" class="routine-scope-picker-list" aria-live="polite"></div>
+                </div>
+              </div>
+              <p class="routine-security-note">Document content is treated as untrusted reference data. Routines cannot call local tools, send messages, or run loops. Global routines may use limited public web search.</p>
+              <button id="createRoutineButton" class="primary-button" type="submit">Create routine</button>
+            </form>
+            <p id="routineStatus" class="user-management-status" aria-live="polite"></p>
+          </section>
+          <section class="routine-dashboard-panel">
+            <div class="routine-section-head">
+              <div><p class="eyebrow">Schedule</p><h3>Your routines</h3></div>
+              <button id="routineSystemPauseButton" class="ghost-button compact-button is-hidden" type="button">Pause all</button>
+            </div>
+            <p id="routinePolicySummary" class="mode-description">Loading execution limits...</p>
+            <div id="routineList" class="routine-list" aria-live="polite"></div>
+            <div class="routine-section-head routine-inbox-head"><div><p class="eyebrow">Results</p><h3>Routine inbox</h3></div></div>
+            <div id="routineRunList" class="routine-run-list" aria-live="polite"></div>
+          </section>
         </div>
       </section>
     </div>

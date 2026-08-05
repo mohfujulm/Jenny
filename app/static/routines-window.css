@@ -1,0 +1,187 @@
+/* Dedicated routine-history window. It intentionally reuses the main app's
+   visual tokens and message styles while replacing the chat composer. */
+body.routine-window {
+  overflow: hidden;
+}
+
+.routine-window-shell {
+  display: grid;
+  grid-template-columns: 368px minmax(0, 1fr);
+  gap: 20px;
+  height: calc(100vh / var(--ui-scale));
+  height: calc(100dvh / var(--ui-scale));
+  padding: 20px;
+  overflow: hidden;
+}
+
+.routine-window-sidebar,
+.routine-window-stage {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.routine-window-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.routine-window-sidebar-actions,
+.routine-window-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.routine-window-sidebar-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.routine-window-sidebar-actions .primary-button,
+.routine-window-sidebar-actions .secondary-button,
+.routine-window-sidebar-actions .ghost-button {
+  width: 100%;
+  min-height: 40px;
+}
+
+.routine-window-sidebar-actions .primary-button {
+  grid-column: 1 / -1;
+}
+
+.routine-window-list-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.routine-window-list-panel .saved-conversation-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.routine-window-entry {
+  width: 100%;
+  text-align: left;
+}
+
+.routine-window-entry .saved-conversation-title,
+.routine-window-entry .saved-conversation-summary {
+  display: block;
+}
+
+.routine-window-entry .saved-conversation-summary {
+  margin-top: 4px;
+}
+
+.routine-window-entry.is-paused {
+  opacity: 0.68;
+}
+
+.routine-window-stage {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.routine-window-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 28px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 249, 240, 0.88);
+}
+
+.routine-window-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.routine-window-details {
+  display: grid;
+  gap: 8px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(12, 109, 98, 0.05);
+}
+
+.routine-window-details p {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+
+.routine-window-messages {
+  min-height: 0;
+  padding: 28px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.routine-history-message {
+  position: relative;
+}
+
+.routine-history-message .message-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.routine-history-timestamp {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
+.routine-history-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 23px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(12, 109, 98, 0.1);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.routine-history-status.is-failed {
+  background: rgba(176, 68, 38, 0.12);
+  color: #8f2f18;
+}
+
+.routine-history-meta {
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.routine-history-download {
+  display: inline-flex;
+  margin-top: 12px;
+}
+
+.routine-history-empty {
+  padding: 24px;
+  border: 1px dashed var(--line);
+  border-radius: 18px;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 850px) {
+  .routine-window-shell { grid-template-columns: 1fr; overflow-y: auto; }
+  .routine-window-sidebar { min-height: 300px; }
+  .routine-window-stage { min-height: 620px; }
+}

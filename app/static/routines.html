@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Routines · Ask Jenny</title>
+    <link rel="icon" type="image/png" href="{{APP_ICON_URL}}">
+    <link rel="stylesheet" href="{{APP_CSS_URL}}">
+    <link rel="stylesheet" href="{{ROUTINES_CSS_URL}}">
+  </head>
+  <body class="routine-window">
+    <div class="routine-window-shell">
+      <aside class="routine-window-sidebar">
+        <div class="brand sidebar-brand">
+          <div>
+            <p class="eyebrow">Bounded scheduled work</p>
+            <h1>Routines</h1>
+          </div>
+          <img class="sidebar-brand-mark" src="{{APP_ICON_URL}}" alt="" aria-hidden="true">
+        </div>
+        <p id="routineWindowAccount" class="mode-description">Checking account…</p>
+        <div class="routine-window-sidebar-actions">
+          <button id="routineWindowManage" class="primary-button" type="button">Manage routines</button>
+          <button id="routineWindowRefresh" class="secondary-button" type="button">Refresh</button>
+          <button id="routineWindowClose" class="ghost-button" type="button">Close window</button>
+        </div>
+        <div class="panel routine-window-list-panel">
+          <div class="panel-head"><h2>Saved Routines</h2><span id="routineWindowCount" class="autosave-pill">0</span></div>
+          <div id="routineWindowList" class="saved-conversation-list" aria-live="polite"></div>
+        </div>
+      </aside>
+
+      <main class="routine-window-stage">
+        <header class="routine-window-header">
+          <div>
+            <p class="eyebrow">Routine history</p>
+            <h2 id="routineWindowTitle">Select a routine</h2>
+            <p id="routineWindowMeta" class="mode-description">Each result is kept in this routine’s private history.</p>
+          </div>
+          <div id="routineWindowActions" class="routine-window-actions"></div>
+        </header>
+        <section id="routineWindowDetails" class="routine-window-details is-hidden"></section>
+        <section id="routineWindowMessages" class="routine-window-messages" aria-live="polite">
+          <div class="empty-chat-state"><h3>No routine selected</h3><p>Choose a saved routine on the left to view its output history.</p></div>
+        </section>
+      </main>
+    </div>
+    <script src="{{ROUTINES_JS_URL}}" defer></script>
+  </body>
+</html>

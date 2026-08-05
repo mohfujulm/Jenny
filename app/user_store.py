@@ -118,60 +118,40 @@ class UserStore:
         display_name: str,
         password: str,
     ) -> UserSummary:
+        """Create the bootstrap administrator once and preserve existing users.
+
+        The configured username is only a first-run bootstrap identity. Once a
+        matching account exists, its name, role, active state, password, and
+        audit timestamps belong to normal account administration and must not
+        be rewritten by application startup.
+        """
         normalized_username = self._normalize_username(username)
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT user_id, password_hash FROM users WHERE username = ?",
+                "SELECT user_id FROM users WHERE username = ?",
                 (normalized_username,),
             ).fetchone()
-            if row is not None and row["password_hash"]:
-                user_id = str(row["user_id"])
-                connection.execute(
-                    """
-                    UPDATE users
-                    SET display_name = ?, role = 'admin', is_active = 1, updated_at = ?
-                    WHERE user_id = ?
-                    """,
-                    (
-                        self._normalize_display_name(display_name),
-                        self._now(),
-                        user_id,
-                    ),
+        if row is None:
+            try:
+                return self.create_user(
+                    username=normalized_username,
+                    display_name=display_name,
+                    password=password,
+                    role="admin",
+                    must_change_password=True,
                 )
-                connection.commit()
-            elif row is not None:
-                salt, password_hash = self._hash_password(self._validate_password(password))
-                timestamp = self._now()
-                connection.execute(
-                    """
-                    UPDATE users
-                    SET display_name = ?, role = 'admin', is_active = 1,
-                        password_salt = ?, password_hash = ?,
-                        password_iterations = ?, must_change_password = 1,
-                        updated_at = ?
-                    WHERE user_id = ?
-                    """,
-                    (
-                        self._normalize_display_name(display_name),
-                        salt,
-                        password_hash,
-                        _PASSWORD_ITERATIONS,
-                        timestamp,
-                        str(row["user_id"]),
-                    ),
-                )
-                connection.commit()
-                user_id = str(row["user_id"])
-            else:
-                user_id = ""
-        if not user_id:
-            return self.create_user(
-                username=normalized_username,
-                display_name=display_name,
-                password=password,
-                role="admin",
-                must_change_password=True,
-            )
+            except DuplicateUsernameError:
+                # Another process may have completed first-run bootstrap after
+                # our read. Resolve that race without modifying its account.
+                with self._lock, closing(self._connect()) as connection:
+                    row = connection.execute(
+                        "SELECT user_id FROM users WHERE username = ?",
+                        (normalized_username,),
+                    ).fetchone()
+                if row is None:
+                    raise
+
+        user_id = str(row["user_id"])
         user = self.get_user(user_id)
         if user is None:
             raise RuntimeError("The default Administrator account could not be loaded.")
