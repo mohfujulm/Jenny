@@ -130,6 +130,13 @@ address. Self-service sign-up always creates a **Member** account; the browser
 does not offer role or permission assignment. Passwords are salted and hashed,
 and signed-in sessions use an HttpOnly cookie.
 
+The configured Administrator is a first-run bootstrap account. Application
+startup creates it only when that username does not exist; later startups never
+change an existing account's display name, password, role, active state, or
+audit timestamp. User and conversation stores initialize during FastAPI startup,
+so importing `app.main` for tests or tooling does not open or mutate the user
+database.
+
 Saved conversations are private to their owner. Existing conversations without
 ownership metadata are assigned to the default Administrator during migration.
 New conversations are attached to the signed-in user, and list, load, update,
@@ -171,6 +178,42 @@ truncated. If required state alone exceeds the envelope, the turn stops before
 incurring another API call. Configure the envelope with
 `CHAT_MAX_INPUT_BUDGET` and the per-image charge with
 `CHAT_IMAGE_BUDGET_UNITS`.
+
+### Bounded routines
+
+Signed-in users can create daily or weekly **Routines** from an explicitly
+selected internal-library scope that is independent of the current chat's
+scope. A routine can return a short chat response or
+create a PDF/DOCX file in that user's private routine inbox. Routines are not
+general-purpose agents: every run uses the Standard Luna model, makes at most
+one Responses API call, has no web or tool access, carries no chat history or
+prior reasoning state, performs no automatic retry, and selects document
+context locally without an embedding request. PDF and DOCX packaging happens
+locally after that single response.
+
+Admission is recorded atomically in `app/data/routines.sqlite` before paid work
+starts. Per-user and global daily/monthly run caps, worst-case reserved-unit
+budgets, per-user and global concurrency limits, and a maximum routine count
+prevent a user from creating unbounded spend. Failed and interrupted runs still
+consume their reservation, and a routine pauses automatically after repeated
+failures. Deleting a routine immediately scrubs its instructions and stored
+results but retains a content-free quota ledger, so deletion cannot reset spend
+limits. Administrators have a global pause control; `ROUTINES_ENABLED=false`
+is the deployment kill switch. Completed run records expire after 90 days by
+default, preventing generated files from growing without bound. Definitions
+and result downloads are always owner-scoped, mutations reject cross-site
+cookie requests, inactive accounts cannot execute, credential-like document
+lines are redacted, and embedded
+document instructions are treated as untrusted data.
+
+The defaults are listed under `ROUTINES_*` in `.env.example`. The most important
+cost controls are `ROUTINES_MAX_RUNS_PER_USER_DAILY`,
+`ROUTINES_MAX_RUNS_GLOBAL_DAILY`,
+`ROUTINES_MAX_RESERVED_UNITS_PER_USER_DAILY`,
+`ROUTINES_MAX_RESERVED_UNITS_GLOBAL_DAILY`, and
+`ROUTINES_MAX_INPUT_BUDGET`; storage retention is controlled by
+`ROUTINES_RUN_RETENTION_DAYS`. Windows installations include the `tzdata`
+dependency so IANA time zones and daylight-saving changes are portable.
 
 In **Context: Global**, the agent can find an official datasheet, manual,
 specification, or other public PDF and attach the original file to the private

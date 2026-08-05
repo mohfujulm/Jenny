@@ -8,8 +8,11 @@ import unittest
 from unittest.mock import patch
 
 from app.ingestion import DeleteOutcome
-from app.main import delete_documents_stream
 from app.models import DocumentDeleteRequest
+from tests.main_runtime import main
+
+
+delete_documents_stream = main.delete_documents_stream
 
 
 class DocumentDeleteProgressTests(unittest.TestCase):

@@ -49,6 +49,7 @@ let conversationScrollSaveTimer = null;
 let imageLightboxReturnFocus = null;
 let uiSessionHeartbeatTimer = null;
 let userManagementReturnFocus = null;
+let routinesReturnFocus = null;
 let lastFolderControlClick = {
   folderId: null,
   control: null,
@@ -101,6 +102,24 @@ const state = {
     inFlight: false,
     view: "signin",
   },
+  routines: {
+    items: [],
+    runs: [],
+    policy: {},
+    systemPaused: false,
+    loaded: false,
+    inFlight: false,
+    draftContext: {
+      folderIds: [],
+      documentIds: [],
+    },
+    draftSourceMode: "internal",
+    scopePickerOpen: false,
+    scopeSearchQuery: "",
+    scopeCollapsedFolderIds: [],
+    scopeTreeInitialized: false,
+    editingId: null,
+  },
   library: {
     backend: null,
     totalDocuments: 0,
@@ -151,6 +170,7 @@ const state = {
       folderIds: [],
       documentIds: [],
     },
+    scopeSelectionTarget: "chat",
   },
 };
 
@@ -218,6 +238,37 @@ const composerNote = document.getElementById("composerNote");
 const contextSummary = document.getElementById("contextSummary");
 const contextChipList = document.getElementById("contextChipList");
 const openLibraryButton = document.getElementById("openLibraryButton");
+const openRoutinesButton = document.getElementById("openRoutinesButton");
+const routinesModal = document.getElementById("routinesModal");
+const routinesBackdrop = document.getElementById("routinesBackdrop");
+const closeRoutinesButton = document.getElementById("closeRoutinesButton");
+const routineForm = document.getElementById("routineForm");
+const routineNameInput = document.getElementById("routineNameInput");
+const routineInstructionsInput = document.getElementById("routineInstructionsInput");
+const routineOutputSelect = document.getElementById("routineOutputSelect");
+const routineScheduleSelect = document.getElementById("routineScheduleSelect");
+const routineWeekdayField = document.getElementById("routineWeekdayField");
+const routineWeekdaySelect = document.getElementById("routineWeekdaySelect");
+const routineTimeInput = document.getElementById("routineTimeInput");
+const routineScopeSummary = document.getElementById("routineScopeSummary");
+const routineSourceModeButton = document.getElementById("routineSourceModeButton");
+const routineSourceModeLabel = document.getElementById("routineSourceModeLabel");
+const routineScopeSelectionList = document.getElementById("routineScopeSelectionList");
+const routineScopePickerButton = document.getElementById("routineScopePickerButton");
+const routineScopePicker = document.getElementById("routineScopePicker");
+const routineScopeSearchInput = document.getElementById("routineScopeSearchInput");
+const routineScopePickerList = document.getElementById("routineScopePickerList");
+const clearRoutineScopeButton = document.getElementById("clearRoutineScopeButton");
+const closeRoutineScopePickerButton = document.getElementById("closeRoutineScopePickerButton");
+const createRoutineButton = document.getElementById("createRoutineButton");
+const routineEditorEyebrow = document.getElementById("routineEditorEyebrow");
+const routineEditorHeading = document.getElementById("routineEditorHeading");
+const resetRoutineEditorButton = document.getElementById("resetRoutineEditorButton");
+const routineStatus = document.getElementById("routineStatus");
+const routinePolicySummary = document.getElementById("routinePolicySummary");
+const routineList = document.getElementById("routineList");
+const routineRunList = document.getElementById("routineRunList");
+const routineSystemPauseButton = document.getElementById("routineSystemPauseButton");
 const userLoginBadge = document.getElementById("userLoginBadge");
 const userLoginLabel = document.getElementById("userLoginLabel");
 const userManagementModal = document.getElementById("userManagementModal");
@@ -263,6 +314,7 @@ const documentGenerationInstructionsInput = document.getElementById("documentGen
 const documentGenerationStatus = document.getElementById("documentGenerationStatus");
 const generateDocumentButton = document.getElementById("generateDocumentButton");
 const documentBrowser = document.getElementById("documentBrowser");
+const browserTitle = document.getElementById("browserTitle");
 const closeBrowserButton = document.getElementById("closeBrowserButton");
 const browserPreviewPanel = document.getElementById("browserPreviewPanel");
 const previewPanelTitle = document.getElementById("previewPanelTitle");
@@ -1207,6 +1259,15 @@ function getWatchedFoldersWithinLibraryFolder(folderId) {
 function getFolderDisplayName(folderId, fallbackName = "") {
   const watchedFolder = getWatchedFolderForLibraryFolder(folderId);
   if (!watchedFolder) {
+    const folderRecord = state.library.folders.find(
+      (folder) => normalizeFolderPath(folder.folder_id) === normalizeFolderPath(folderId)
+    );
+    const safeAlias = (folderRecord?.aliases || [])
+      .map((value) => String(value || "").trim())
+      .find(Boolean);
+    if (safeAlias) {
+      return safeAlias;
+    }
     return fallbackName || getFolderNameSegment(folderId);
   }
 
@@ -1748,7 +1809,7 @@ function canMutateLibrary() {
 
 function stripGeneratedUploadCitations(value) {
   return String(value || "")
-    .replace(/[ \t]*\[UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]/gi, "")
+    .replace(/[ \t]*\[?UPL-[A-Za-z0-9][A-Za-z0-9_-]*\]?/gi, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -1798,6 +1859,7 @@ function applyAuthenticationGate() {
   newConversationButton.disabled = !authenticated;
   conversationSearchInput.disabled = !authenticated;
   openLibraryButton.disabled = !authenticated;
+  openRoutinesButton.disabled = !authenticated;
   if (openSynchronizedPathsButton) {
     openSynchronizedPathsButton.disabled = !authenticated || !canManageLibrary();
   }
@@ -1844,6 +1906,23 @@ function clearLibraryWorkspaceForAuth() {
   if (folderPropertiesSource) {
     folderPropertiesSource.textContent = "";
   }
+}
+
+function clearRoutineWorkspaceForAuth() {
+  closeRoutines();
+  state.routines.items = [];
+  state.routines.runs = [];
+  state.routines.policy = {};
+  state.routines.systemPaused = false;
+  state.routines.loaded = false;
+  state.routines.inFlight = false;
+  state.routines.draftContext = { folderIds: [], documentIds: [] };
+  state.routines.draftSourceMode = "internal";
+  state.routines.scopePickerOpen = false;
+  state.routines.scopeSearchQuery = "";
+  state.routines.scopeCollapsedFolderIds = [];
+  state.routines.scopeTreeInitialized = false;
+  renderRoutines();
 }
 
 async function activateAuthenticatedConversationWorkspace() {
@@ -1951,10 +2030,20 @@ async function loadAuthSession() {
 async function initializeAuthenticatedWorkspace() {
   await loadAuthSession();
   if (state.auth.user && !state.auth.user.must_change_password) {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("routines_popup") === "1") {
+      const requestedRoutineId = String(params.get("routine_id") || "");
+      if (requestedRoutineId) {
+        void openRoutineEditor(requestedRoutineId);
+      } else {
+        void openRoutines();
+      }
+    }
     await activateAuthenticatedConversationWorkspace();
   } else {
     clearConversationWorkspaceForAuth();
     clearLibraryWorkspaceForAuth();
+    clearRoutineWorkspaceForAuth();
   }
 }
 
@@ -2061,6 +2150,7 @@ async function signOut() {
     renderAuth();
     clearConversationWorkspaceForAuth();
     clearLibraryWorkspaceForAuth();
+    clearRoutineWorkspaceForAuth();
     setUserManagementStatus(payload.message || "Signed out.", "success");
     signInPasswordInput.value = "";
     window.requestAnimationFrame(() => signInUsernameInput.focus());
@@ -2068,6 +2158,701 @@ async function signOut() {
     setUserManagementStatus(error.message, "error");
   } finally {
     state.auth.inFlight = false;
+  }
+}
+
+// Bounded routines ---------------------------------------------------------
+function setRoutineStatus(message, tone = "neutral") {
+  routineStatus.textContent = message || "";
+  routineStatus.dataset.tone = tone;
+}
+
+function activeRoutineScope() {
+  return {
+    folder_ids: [...state.routines.draftContext.folderIds],
+    document_ids: [...state.routines.draftContext.documentIds],
+  };
+}
+
+function renderRoutineScopeSummary() {
+  const isGlobal = state.routines.draftSourceMode === "broader";
+  const folders = state.routines.draftContext.folderIds.length;
+  const documents = state.routines.draftContext.documentIds.length;
+  const selected = folders + documents;
+  routineScopeSummary.textContent = isGlobal
+    ? selected
+      ? `Global context is active. ${folders} folder${folders === 1 ? "" : "s"} and ${documents} file${documents === 1 ? "" : "s"} are included, with one limited public web search available.`
+      : "Global context is active. This routine may use one limited public web search; adding a document scope is optional."
+    : selected
+    ? `${folders} folder${folders === 1 ? "" : "s"} and ${documents} file${documents === 1 ? "" : "s"} selected for this routine only.`
+    : "No routine scope selected. It is independent from the current chat scope.";
+  routineScopeSelectionList.replaceChildren();
+  state.routines.draftContext.folderIds.forEach((folderId) => {
+    renderScopePill(
+      routineScopeSelectionList,
+      `Folder: ${formatFolderDisplayPath(folderId)}`,
+      () => setRoutineScopeSelected("folder", folderId, false)
+    );
+  });
+  state.routines.draftContext.documentIds.forEach((documentId) => {
+    const documentSummary = getDocumentSummary(documentId);
+    renderScopePill(
+      routineScopeSelectionList,
+      documentSummary ? getDocumentChipLabel(documentSummary) : `Doc: ${documentId}`,
+      () => setRoutineScopeSelected("document", documentId, false)
+    );
+  });
+  routineScopePickerButton.disabled = state.routines.inFlight;
+  createRoutineButton.disabled = state.routines.inFlight || (!isGlobal && selected === 0);
+}
+
+function applyRoutineSourceMode(sourceMode) {
+  state.routines.draftSourceMode = sourceMode === "broader" ? "broader" : "internal";
+  const isGlobal = state.routines.draftSourceMode === "broader";
+  routineSourceModeButton.classList.toggle("is-broader", isGlobal);
+  routineSourceModeButton.setAttribute("aria-pressed", String(isGlobal));
+  routineSourceModeButton.setAttribute("aria-label", isGlobal ? "Context: Global" : "Context: Internal");
+  routineSourceModeButton.title = isGlobal
+    ? "Context: Global is active. Click for Context: Internal."
+    : "Context: Internal is active. Click for Context: Global.";
+  routineSourceModeLabel.textContent = isGlobal ? "Context: Global" : "Context: Internal";
+}
+
+function routineScopeSelectionCount() {
+  return (
+    state.routines.draftContext.folderIds.length +
+    state.routines.draftContext.documentIds.length
+  );
+}
+
+function isRoutineScopeSelected(kind, id) {
+  return kind === "folder"
+    ? state.routines.draftContext.folderIds.includes(id)
+    : state.routines.draftContext.documentIds.includes(id);
+}
+
+function getRoutineFolderAliases(folderId) {
+  const normalizedFolderId = normalizeFolderPath(folderId);
+  if (!normalizedFolderId) {
+    return [];
+  }
+  return normalizeItems(
+    [
+      ...(state.library.folders.find(
+        (folder) => normalizeFolderPath(folder.folder_id) === normalizedFolderId
+      )?.aliases || []),
+      ...state.library.watchFolders
+        .filter(
+          (watchFolder) =>
+            getResolvedWatchedLibraryFolder(watchFolder) === normalizedFolderId
+        )
+        .flatMap((watchFolder) => [watchFolder.alias, watchFolder.display_name]),
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  );
+}
+
+function isRoutineScopeFolderCollapsed(folderId) {
+  return state.routines.scopeCollapsedFolderIds.includes(normalizeFolderPath(folderId));
+}
+
+function toggleRoutineScopeFolderCollapsed(folderId) {
+  const normalizedFolderId = normalizeFolderPath(folderId);
+  const collapsed = new Set(state.routines.scopeCollapsedFolderIds);
+  if (collapsed.has(normalizedFolderId)) {
+    collapsed.delete(normalizedFolderId);
+  } else {
+    collapsed.add(normalizedFolderId);
+  }
+  state.routines.scopeCollapsedFolderIds = normalizeItems(Array.from(collapsed));
+  renderRoutines();
+}
+
+function setRoutineScopeSelected(kind, id, selected) {
+  const key = kind === "folder" ? "folderIds" : "documentIds";
+  const current = state.routines.draftContext[key];
+  if (selected && !current.includes(id)) {
+    if (routineScopeSelectionCount() >= 20) {
+      setRoutineStatus("A routine can include at most 20 folders and files.", "error");
+      return;
+    }
+    state.routines.draftContext[key] = [...current, id];
+  } else if (!selected) {
+    state.routines.draftContext[key] = current.filter((item) => item !== id);
+  }
+  renderRoutines();
+}
+
+function renderRoutineScopePicker() {
+  const pickerOpen = state.routines.scopePickerOpen;
+  routineScopePicker.classList.toggle("is-hidden", !pickerOpen);
+  routineScopePickerButton.textContent = "Open Library to select scope";
+  if (!pickerOpen) {
+    return;
+  }
+
+  routineScopePickerList.replaceChildren();
+  if (!state.library.loaded) {
+    const loading = document.createElement("p");
+    loading.className = "routine-empty";
+    loading.textContent = "Loading library choices...";
+    routineScopePickerList.append(loading);
+    return;
+  }
+  if (state.library.loadError) {
+    const unavailable = document.createElement("p");
+    unavailable.className = "routine-run-error";
+    unavailable.textContent = `Library choices are unavailable: ${state.library.loadError}`;
+    routineScopePickerList.append(unavailable);
+    return;
+  }
+
+  const query = state.routines.scopeSearchQuery.trim().toLowerCase();
+  const matches = (value) => !query || String(value || "").toLowerCase().includes(query);
+  const tree = getFolderTreeNodes();
+  let visibleItemCount = 0;
+
+  const documentMatchesSearch = (documentSummary) =>
+    matches(
+      [
+        documentSummary.title,
+        documentSummary.folder,
+        formatFolderDisplayPath(documentSummary.folder),
+        documentSummary.category,
+      ].join(" ")
+    );
+
+  const renderDocumentRow = (documentSummary, depth) => {
+    const includedViaFolder = state.routines.draftContext.folderIds.some((folderId) =>
+      folderPathContainsFolder(folderId, documentSummary.folder)
+    );
+    const isDirectlySelected = isRoutineScopeSelected("document", documentSummary.document_id);
+    const row = document.createElement("label");
+    row.className = "routine-scope-tree-document";
+    row.classList.toggle("is-scoped", includedViaFolder || isDirectlySelected);
+    row.style.paddingLeft = `${depth * 12 + 30}px`;
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = includedViaFolder || isDirectlySelected;
+    checkbox.disabled = state.routines.inFlight || includedViaFolder;
+    checkbox.title = includedViaFolder
+      ? "Included by the selected parent folder"
+      : "Include this file only";
+    checkbox.addEventListener("change", () => {
+      setRoutineScopeSelected("document", documentSummary.document_id, checkbox.checked);
+    });
+
+    const copy = document.createElement("span");
+    copy.className = "routine-scope-tree-copy";
+    const name = document.createElement("strong");
+    name.textContent = documentSummary.title || getDocumentDisplayLabel(documentSummary);
+    name.title = getDocumentDisplayLabel(documentSummary);
+    const meta = document.createElement("small");
+    meta.textContent = documentSummary.category || "Library file";
+    copy.append(name, meta);
+    row.append(checkbox, copy);
+    return row;
+  };
+
+  const renderNode = (node) => {
+    const folderDocuments = node.pathId ? getFolderDocuments(node.pathId) : [];
+    const visibleDocuments = folderDocuments.filter(documentMatchesSearch);
+    const children = node.children.map(renderNode).filter(Boolean);
+    const aliases = node.pathId ? getRoutineFolderAliases(node.pathId) : [];
+    const folderSearchText = node.pathId
+      ? [node.pathId, formatFolderDisplayPath(node.pathId), ...aliases].join(" ")
+      : node.label;
+    const folderMatches = matches(folderSearchText);
+    const isVisible = !query || folderMatches || visibleDocuments.length > 0 || children.length > 0;
+    if (!isVisible) {
+      return null;
+    }
+
+    const item = document.createElement("div");
+    item.className = "routine-scope-tree-item";
+    if (node.pathId) {
+      const hasChildren = node.children.length > 0 || folderDocuments.length > 0;
+      const directlySelected = node.folder && isRoutineScopeSelected("folder", node.folder.folder_id);
+      const selectedByAncestor = node.folder && !directlySelected && state.routines.draftContext.folderIds.some((folderId) =>
+        folderPathContainsFolder(folderId, node.folder.folder_id)
+      );
+      const collapsed = !query && isRoutineScopeFolderCollapsed(node.pathId);
+      const row = document.createElement("div");
+      row.className = "routine-scope-tree-row";
+      row.classList.toggle("is-scoped", Boolean(directlySelected || selectedByAncestor));
+      row.style.paddingLeft = `${node.depth * 12}px`;
+
+      const expand = document.createElement("button");
+      expand.type = "button";
+      expand.className = "routine-scope-expand-button";
+      expand.disabled = !hasChildren;
+      expand.textContent = hasChildren ? (collapsed ? ">" : "v") : "";
+      expand.setAttribute("aria-label", collapsed ? "Expand folder" : "Collapse folder");
+      expand.addEventListener("click", () => {
+        if (hasChildren) {
+          toggleRoutineScopeFolderCollapsed(node.pathId);
+        }
+      });
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = Boolean(directlySelected || selectedByAncestor);
+      checkbox.disabled = state.routines.inFlight || Boolean(selectedByAncestor) || !node.folder;
+      checkbox.title = selectedByAncestor
+        ? "Included by the selected parent folder"
+        : "Include this folder and its contents";
+      checkbox.addEventListener("change", () => {
+        if (node.folder) {
+          setRoutineScopeSelected("folder", node.folder.folder_id, checkbox.checked);
+        }
+      });
+
+      const copy = document.createElement("span");
+      copy.className = "routine-scope-tree-copy";
+      const name = document.createElement("strong");
+      name.textContent = getFolderDisplayName(node.pathId, node.label);
+      name.title = `${formatFolderDisplayPath(node.pathId)} (${formatFolderPath(node.pathId)})`;
+      const meta = document.createElement("small");
+      const aliasText = aliases.filter((alias) => alias !== name.textContent).join(" · ");
+      meta.textContent = aliasText
+        ? `Alias: ${aliasText} · ${node.totalDocumentCount} indexed file${node.totalDocumentCount === 1 ? "" : "s"}`
+        : `${node.totalDocumentCount} indexed file${node.totalDocumentCount === 1 ? "" : "s"}`;
+      copy.append(name, meta);
+      row.append(expand, checkbox, copy);
+      item.append(row);
+      if (!collapsed) {
+        children.forEach((child) => item.append(child));
+        visibleDocuments.forEach((documentSummary) => item.append(renderDocumentRow(documentSummary, node.depth + 1)));
+      }
+    } else {
+      children.forEach((child) => item.append(child));
+    }
+    visibleItemCount += 1;
+    return item;
+  };
+
+  const renderedTree = renderNode(tree);
+  if (!renderedTree || visibleItemCount === 0) {
+    const empty = document.createElement("p");
+    empty.className = "routine-empty";
+    empty.textContent = query ? "No folders or files match that search." : "No library folders or files are available.";
+    routineScopePickerList.append(empty);
+    return;
+  }
+  routineScopePickerList.append(renderedTree);
+}
+
+function openRoutineScopePicker() {
+  state.routines.scopePickerOpen = false;
+  renderRoutines();
+  openDocumentBrowser({ scopeTarget: "routine" });
+}
+
+function formatRoutineDate(value) {
+  if (!value) {
+    return "Not yet";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function routineScheduleLabel(routine) {
+  const time = `${String(routine.schedule_hour).padStart(2, "0")}:${String(routine.schedule_minute).padStart(2, "0")}`;
+  if (routine.schedule_kind === "weekly") {
+    const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    return `${weekdays[routine.schedule_weekday] || "Weekly"} at ${time} (${routine.timezone})`;
+  }
+  return `Daily at ${time} (${routine.timezone})`;
+}
+
+function appendRoutineAction(label, className, handler, disabled = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function renderRoutines() {
+  renderRoutineScopeSummary();
+  renderRoutineScopePicker();
+  const policy = state.routines.policy || {};
+  routinePolicySummary.textContent = state.routines.loaded
+    ? `Up to ${policy.max_runs_per_user_daily || 0} runs/day and ${policy.max_runs_per_user_monthly || 0} runs/month per user; ${policy.max_documents || 0} documents/run; ${policy.run_retention_days || 0}-day result retention. Failed runs count toward limits.`
+    : "Routine limits are enforced by the server before every model request.";
+  routineSystemPauseButton.classList.toggle("is-hidden", state.auth.user?.role !== "admin");
+  routineSystemPauseButton.textContent = state.routines.systemPaused ? "Resume all" : "Pause all";
+  routineSystemPauseButton.disabled = state.routines.inFlight;
+
+  routineList.replaceChildren();
+  if (!state.routines.loaded) {
+    const loading = document.createElement("p");
+    loading.className = "routine-empty";
+    loading.textContent = "Loading routines...";
+    routineList.append(loading);
+  } else if (!state.routines.items.length) {
+    const empty = document.createElement("p");
+    empty.className = "routine-empty";
+    empty.textContent = "No routines yet. Create one with its own internal library scope.";
+    routineList.append(empty);
+  } else {
+    state.routines.items.forEach((routine) => {
+      const card = document.createElement("article");
+      card.className = `routine-card${routine.enabled ? "" : " is-paused"}`;
+      const head = document.createElement("div");
+      head.className = "routine-card-head";
+      const titleWrap = document.createElement("div");
+      const title = document.createElement("h4");
+      title.textContent = routine.name;
+      const schedule = document.createElement("p");
+      schedule.textContent = routineScheduleLabel(routine);
+      titleWrap.append(title, schedule);
+      const badge = document.createElement("span");
+      badge.className = `routine-state-pill${routine.enabled ? "" : " is-paused"}`;
+      badge.textContent = routine.enabled ? "Active" : "Paused";
+      head.append(titleWrap, badge);
+      const instructions = document.createElement("p");
+      instructions.className = "routine-instructions";
+      instructions.textContent = routine.instructions;
+      const meta = document.createElement("p");
+      meta.className = "routine-meta";
+      meta.textContent = `Next: ${formatRoutineDate(routine.next_run_at)} · ${String(routine.output_format).toUpperCase()} · Failures: ${routine.consecutive_failures}`;
+      const actions = document.createElement("div");
+      actions.className = "routine-card-actions";
+      actions.append(
+        appendRoutineAction("Run now", "primary-button compact-button", () => void runRoutineNow(routine.routine_id), state.routines.inFlight || state.routines.systemPaused),
+        appendRoutineAction("Edit", "secondary-button compact-button", () => void openRoutineEditor(routine.routine_id), state.routines.inFlight),
+        appendRoutineAction(routine.enabled ? "Pause" : "Enable", "ghost-button compact-button", () => void toggleRoutine(routine), state.routines.inFlight),
+        appendRoutineAction("Delete", "ghost-button compact-button routine-delete-button", () => void deleteRoutine(routine), state.routines.inFlight)
+      );
+      card.append(head, instructions, meta, actions);
+      routineList.append(card);
+    });
+  }
+
+  routineRunList.replaceChildren();
+  if (!state.routines.runs.length) {
+    const empty = document.createElement("p");
+    empty.className = "routine-empty";
+    empty.textContent = "Completed chat responses and generated documents will appear here.";
+    routineRunList.append(empty);
+    return;
+  }
+  state.routines.runs.forEach((run) => {
+    const card = document.createElement("article");
+    card.className = `routine-run-card is-${run.status}`;
+    const head = document.createElement("div");
+    head.className = "routine-card-head";
+    const title = document.createElement("h4");
+    title.textContent = run.routine_name;
+    const badge = document.createElement("span");
+    badge.className = "routine-state-pill";
+    badge.textContent = run.status;
+    head.append(title, badge);
+    const meta = document.createElement("p");
+    meta.className = "routine-meta";
+    meta.textContent = `${formatRoutineDate(run.started_at)} · ${run.trigger}${run.total_tokens != null ? ` · ${run.total_tokens} tokens` : ""}`;
+    card.append(head, meta);
+    if (run.response_text) {
+      const response = document.createElement("p");
+      response.className = "routine-run-response";
+      response.textContent = run.response_text;
+      card.append(response);
+    }
+    if (run.error_code) {
+      const error = document.createElement("p");
+      error.className = "routine-run-error";
+      error.textContent = `Run failed: ${run.error_code}. No automatic retry was made.`;
+      card.append(error);
+    }
+    if (run.has_document) {
+      const download = document.createElement("a");
+      download.className = "secondary-button compact-button routine-download";
+      download.href = `/api/routines/runs/${encodeURIComponent(run.run_id)}/document`;
+      download.textContent = `Download ${run.filename || "document"}`;
+      card.append(download);
+    }
+    appendRoutineOutputActions(card, run.run_id);
+    routineRunList.append(card);
+  });
+}
+
+function appendRoutineOutputActions(card, runId) {
+  card.classList.add("routine-run-card-actions-menu");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "message-actions-button";
+  button.setAttribute("aria-label", "Routine output actions");
+  button.setAttribute("aria-expanded", "false");
+  button.textContent = "⋯";
+  const menu = document.createElement("div");
+  menu.className = "message-actions-menu is-hidden";
+  menu.setAttribute("role", "menu");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "message-actions-menu-item message-actions-menu-item-danger";
+  remove.setAttribute("role", "menuitem");
+  remove.textContent = "Delete routine output";
+  remove.addEventListener("click", () => {
+    menu.classList.add("is-hidden");
+    button.setAttribute("aria-expanded", "false");
+    void deleteRoutineRunOutput(runId);
+  });
+  menu.append(remove);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const hidden = menu.classList.toggle("is-hidden");
+    button.setAttribute("aria-expanded", String(!hidden));
+  });
+  card.append(button, menu);
+}
+
+async function routineApi(endpoint, options = {}) {
+  const response = await fetch(endpoint, {
+    cache: "no-store",
+    ...options,
+    headers: options.body ? { "Content-Type": "application/json", ...(options.headers || {}) } : options.headers,
+  });
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(typeof payload?.detail === "string" ? payload.detail : "Routine request failed.");
+  }
+  return payload;
+}
+
+async function loadRoutines() {
+  try {
+    const payload = await routineApi("/api/routines");
+    state.routines.items = Array.isArray(payload.routines) ? payload.routines : [];
+    state.routines.runs = Array.isArray(payload.runs) ? payload.runs : [];
+    state.routines.policy = payload.policy || {};
+    state.routines.systemPaused = Boolean(payload.system_paused);
+    state.routines.loaded = true;
+    renderRoutines();
+  } catch (error) {
+    state.routines.loaded = true;
+    renderRoutines();
+    setRoutineStatus(error.message, "error");
+  }
+}
+
+async function openRoutines(returnFocus = openRoutinesButton) {
+  if (!state.auth.user || state.auth.user.must_change_password) {
+    openUserManagement(returnFocus);
+    return;
+  }
+  closeSavedConversationContextMenu();
+  routinesReturnFocus = returnFocus;
+  routinesModal.classList.remove("is-hidden");
+  routinesModal.setAttribute("aria-hidden", "false");
+  setRoutineStatus("", "neutral");
+  renderRoutines();
+  await loadRoutines();
+  window.requestAnimationFrame(() => routineNameInput.focus());
+}
+
+function resetRoutineEditor() {
+  state.routines.editingId = null;
+  routineForm.reset();
+  applyRoutineSourceMode("internal");
+  routineTimeInput.value = "09:00";
+  routineWeekdayField.classList.add("is-hidden");
+  state.routines.draftContext = { folderIds: [], documentIds: [] };
+  state.routines.scopeSearchQuery = "";
+  state.routines.scopePickerOpen = false;
+  state.routines.scopeCollapsedFolderIds = [];
+  state.routines.scopeTreeInitialized = false;
+  routineEditorEyebrow.textContent = "New routine";
+  routineEditorHeading.textContent = "Create a recurring task";
+  createRoutineButton.textContent = "Create routine";
+  resetRoutineEditorButton.classList.add("is-hidden");
+}
+
+async function openRoutineEditor(routineId) {
+  window.focus();
+  await openRoutines();
+  const routine = state.routines.items.find((item) => item.routine_id === routineId);
+  if (!routine) {
+    setRoutineStatus("That routine is no longer available.", "error");
+    return;
+  }
+  state.routines.editingId = routine.routine_id;
+  routineNameInput.value = routine.name || "";
+  routineInstructionsInput.value = routine.instructions || "";
+  routineOutputSelect.value = routine.output_format || "chat";
+  routineScheduleSelect.value = routine.schedule_kind === "weekly" ? "weekly" : "daily";
+  routineTimeInput.value = `${String(routine.schedule_hour).padStart(2, "0")}:${String(routine.schedule_minute).padStart(2, "0")}`;
+  routineWeekdaySelect.value = String(routine.schedule_weekday ?? 0);
+  routineWeekdayField.classList.toggle("is-hidden", routineScheduleSelect.value !== "weekly");
+  state.routines.draftContext = {
+    folderIds: [...(routine.context_filter?.folder_ids || [])],
+    documentIds: [...(routine.context_filter?.document_ids || [])],
+  };
+  applyRoutineSourceMode(routine.source_mode === "broader" ? "broader" : "internal");
+  routineEditorEyebrow.textContent = "Edit routine";
+  routineEditorHeading.textContent = "Update this recurring task";
+  createRoutineButton.textContent = "Save changes";
+  resetRoutineEditorButton.classList.remove("is-hidden");
+  setRoutineStatus("Editing routine. Changes take effect on its next run.", "neutral");
+  renderRoutines();
+  window.requestAnimationFrame(() => {
+    window.focus();
+    routineNameInput.focus();
+  });
+}
+
+function closeRoutines() {
+  if (!routinesModal || routinesModal.classList.contains("is-hidden")) {
+    return;
+  }
+  if (new URLSearchParams(window.location.search).get("routines_popup") === "1" && window.opener && !window.opener.closed) {
+    window.close();
+    return;
+  }
+  routinesModal.classList.add("is-hidden");
+  routinesModal.setAttribute("aria-hidden", "true");
+  resetRoutineEditor();
+  const returnFocus = routinesReturnFocus;
+  routinesReturnFocus = null;
+  if (returnFocus && document.contains(returnFocus)) {
+    returnFocus.focus();
+  }
+}
+
+async function createRoutineFromForm() {
+  const scope = activeRoutineScope();
+  if (state.routines.draftSourceMode === "internal" && !scope.folder_ids.length && !scope.document_ids.length) {
+    setRoutineStatus("Choose at least one internal folder or file first.", "error");
+    return;
+  }
+  const [hourText, minuteText] = String(routineTimeInput.value || "09:00").split(":");
+  const scheduleKind = routineScheduleSelect.value === "weekly" ? "weekly" : "daily";
+  const body = {
+    name: routineNameInput.value.trim(),
+    instructions: routineInstructionsInput.value.trim(),
+    output_format: routineOutputSelect.value,
+    source_mode: state.routines.draftSourceMode,
+    schedule_kind: scheduleKind,
+    schedule_hour: Number(hourText),
+    schedule_minute: Number(minuteText),
+    schedule_weekday: scheduleKind === "weekly" ? Number(routineWeekdaySelect.value) : null,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    context_filter: scope,
+    enabled: true,
+  };
+  const editingId = state.routines.editingId;
+  const existingRoutine = editingId ? state.routines.items.find((item) => item.routine_id === editingId) : null;
+  if (editingId && !existingRoutine) {
+    setRoutineStatus("That routine is no longer available.", "error");
+    return;
+  }
+  body.enabled = existingRoutine ? Boolean(existingRoutine.enabled) : true;
+  state.routines.inFlight = true;
+  renderRoutines();
+  setRoutineStatus(editingId ? "Saving routine..." : "Creating routine...", "neutral");
+  try {
+    const payload = await routineApi(editingId ? `/api/routines/${encodeURIComponent(editingId)}` : "/api/routines", { method: editingId ? "PUT" : "POST", body: JSON.stringify(body) });
+    resetRoutineEditor();
+    setRoutineStatus(payload.message || (editingId ? "Routine updated." : "Routine created."), "success");
+    await loadRoutines();
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
+  }
+}
+
+async function runRoutineNow(routineId) {
+  state.routines.inFlight = true;
+  renderRoutines();
+  setRoutineStatus("Running once within the reserved token budget...", "neutral");
+  try {
+    const payload = await routineApi(`/api/routines/${encodeURIComponent(routineId)}/run`, { method: "POST" });
+    setRoutineStatus(payload.message || "Routine completed.", "success");
+    await loadRoutines();
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+    await loadRoutines();
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
+  }
+}
+
+async function toggleRoutine(routine) {
+  state.routines.inFlight = true;
+  renderRoutines();
+  try {
+    const payload = await routineApi(`/api/routines/${encodeURIComponent(routine.routine_id)}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ enabled: !routine.enabled }),
+    });
+    setRoutineStatus(payload.message, "success");
+    await loadRoutines();
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
+  }
+}
+
+async function deleteRoutine(routine) {
+  if (!window.confirm(`Delete routine "${routine.name}" and all of its stored results?`)) {
+    return;
+  }
+  state.routines.inFlight = true;
+  renderRoutines();
+  try {
+    const payload = await routineApi(`/api/routines/${encodeURIComponent(routine.routine_id)}`, { method: "DELETE" });
+    setRoutineStatus(payload.message, "success");
+    await loadRoutines();
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
+  }
+}
+
+async function deleteRoutineRunOutput(runId) {
+  if (!window.confirm("Delete this routine output and any generated file? This cannot be undone.")) {
+    return;
+  }
+  state.routines.inFlight = true;
+  renderRoutines();
+  try {
+    const payload = await routineApi(`/api/routines/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+    setRoutineStatus(payload.message, "success");
+    await loadRoutines();
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
+  }
+}
+
+async function toggleRoutineSystemPause() {
+  state.routines.inFlight = true;
+  renderRoutines();
+  try {
+    const payload = await routineApi("/api/routines/admin/pause", {
+      method: "POST",
+      body: JSON.stringify({ paused: !state.routines.systemPaused }),
+    });
+    state.routines.systemPaused = Boolean(payload.system_paused);
+    setRoutineStatus(payload.message, "success");
+  } catch (error) {
+    setRoutineStatus(error.message, "error");
+  } finally {
+    state.routines.inFlight = false;
+    renderRoutines();
   }
 }
 
@@ -4230,16 +5015,25 @@ function renderScopePane() {
 
   const appliedCoverage = getScopeCoverage(state.library.appliedContext);
   const draftCoverage = getScopeCoverage(state.library.draftContext);
+  const routineScopeMode = state.library.scopeSelectionTarget === "routine";
   scopeInventorySummary.textContent =
-    state.sourceMode === "broader" &&
-    state.library.draftContext.folderIds.length === 0 &&
-    state.library.draftContext.documentIds.length === 0
+    routineScopeMode
+      ? "Routine scope is independent from the current conversation scope."
+      : state.sourceMode === "broader" &&
+        state.library.draftContext.folderIds.length === 0 &&
+        state.library.draftContext.documentIds.length === 0
       ? "Global context is active; no internal documents are selected."
       : draftCoverage.excludedDocuments.length === 0
         ? "Everything in the indexed library is currently in scope."
         : `${draftCoverage.includedDocuments.length} document${draftCoverage.includedDocuments.length === 1 ? "" : "s"} in scope, ${draftCoverage.excludedDocuments.length} outside scope.`;
-  scopeAppliedSummary.textContent = buildScopeStatusText(state.library.appliedContext, appliedCoverage, "Applied");
-  scopeDraftSummary.textContent = buildScopeStatusText(state.library.draftContext, draftCoverage, "Selected");
+  scopeAppliedSummary.textContent = routineScopeMode
+    ? "The current chat scope will not be changed by these selections."
+    : buildScopeStatusText(state.library.appliedContext, appliedCoverage, "Applied");
+  scopeDraftSummary.textContent = buildScopeStatusText(
+    state.library.draftContext,
+    draftCoverage,
+    routineScopeMode ? "Routine selected" : "Selected"
+  );
 
   scopeIncludedList.innerHTML = "";
   if (
@@ -4249,7 +5043,9 @@ function renderScopePane() {
     const empty = document.createElement("p");
     empty.className = "scope-list-empty";
     empty.textContent =
-      state.sourceMode === "broader"
+      routineScopeMode
+        ? "No routine documents are selected yet."
+        : state.sourceMode === "broader"
         ? "No internal documents are selected while Global context is active."
         : "All indexed documents are included right now.";
     scopeIncludedList.appendChild(empty);
@@ -5119,6 +5915,14 @@ function toggleFolderScope(folderId) {
     nextFolders.add(folderId);
   }
   state.library.draftContext.folderIds = normalizeItems(Array.from(nextFolders));
+  if (state.library.scopeSelectionTarget === "routine") {
+    state.routines.draftContext = cloneContextFilter(state.library.draftContext);
+    renderScopePane();
+    renderFolderTree();
+    renderDocumentFileList();
+    renderRoutines();
+    return;
+  }
   commitDraftContextScope();
   renderFolderTree();
   renderDocumentFileList();
@@ -5132,6 +5936,14 @@ function toggleDocumentScope(documentId) {
     nextDocumentIds.add(documentId);
   }
   state.library.draftContext.documentIds = normalizeItems(Array.from(nextDocumentIds));
+  if (state.library.scopeSelectionTarget === "routine") {
+    state.routines.draftContext = cloneContextFilter(state.library.draftContext);
+    renderScopePane();
+    renderFolderTree();
+    renderDocumentFileList();
+    renderRoutines();
+    return;
+  }
   commitDraftContextScope();
   renderFolderTree();
   renderDocumentFileList();
@@ -6619,11 +7431,13 @@ function renderPreview() {
 }
 
 // Modal lifecycle and context-scope commit ---------------------------------
-function openDocumentBrowser() {
+function openDocumentBrowser(options = {}) {
+  const scopeTarget = options.scopeTarget === "routine" ? "routine" : "chat";
   if (!state.auth.user || state.auth.user.must_change_password) {
     openUserManagement(openLibraryButton);
     return;
   }
+  state.library.scopeSelectionTarget = scopeTarget;
   if (!state.library.loaded && !state.library.loadError) {
     state.library.collapseFoldersOnLoad = true;
     void loadDocumentLibrary();
@@ -6642,7 +7456,12 @@ function openDocumentBrowser() {
   state.library.editorDismissed = false;
   closeExplorerContextMenu();
   state.library.collapsedFolderIds = getAllLibraryFolderPathIds();
-  state.library.draftContext = cloneContextFilter(state.library.appliedContext);
+  state.library.draftContext = cloneContextFilter(
+    scopeTarget === "routine" ? state.routines.draftContext : state.library.appliedContext
+  );
+  browserTitle.textContent = scopeTarget === "routine"
+    ? "Select routine documents"
+    : "Indexed Documents";
   renderBrowserStats();
   renderDeleteSelectionSummary();
   renderLibraryExplorer();
@@ -6654,6 +7473,13 @@ function openDocumentBrowser() {
 function closeDocumentBrowser() {
   closeExplorerContextMenu();
   closeSynchronizedPathsMenu();
+  if (state.library.scopeSelectionTarget === "routine") {
+    state.routines.draftContext = cloneContextFilter(state.library.draftContext);
+    state.routines.scopePickerOpen = false;
+    renderRoutines();
+  }
+  state.library.scopeSelectionTarget = "chat";
+  browserTitle.textContent = "Indexed Documents";
   documentBrowser.classList.add("is-hidden");
   documentBrowser.setAttribute("aria-hidden", "true");
 }
@@ -6670,6 +7496,11 @@ function applyContextSelection(nextContext) {
 }
 
 function commitDraftContextScope() {
+  if (state.library.scopeSelectionTarget === "routine") {
+    state.routines.draftContext = cloneContextFilter(state.library.draftContext);
+    renderRoutines();
+    return;
+  }
   const nextContext = cloneContextFilter(state.library.draftContext);
   const changed = !contextFiltersEqual(nextContext, state.library.appliedContext);
   applyContextSelection(nextContext);
@@ -7170,6 +8001,57 @@ openLibraryButton.addEventListener("click", () => {
   openDocumentBrowser();
 });
 
+openRoutinesButton.addEventListener("click", () => {
+  const routineWindow = window.open("/routines", "_blank");
+  if (routineWindow) {
+    routineWindow.focus();
+  } else {
+    setConversationMemoryStatus("Your browser blocked the Routines window. Allow pop-ups for Ask Jenny and try again.", "error");
+  }
+});
+
+closeRoutinesButton.addEventListener("click", closeRoutines);
+routinesBackdrop.addEventListener("click", closeRoutines);
+routineScheduleSelect.addEventListener("change", () => {
+  routineWeekdayField.classList.toggle("is-hidden", routineScheduleSelect.value !== "weekly");
+});
+routineSourceModeButton.addEventListener("click", () => {
+  applyRoutineSourceMode(state.routines.draftSourceMode === "internal" ? "broader" : "internal");
+  renderRoutines();
+});
+routineForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void createRoutineFromForm();
+});
+routineScopePickerButton.addEventListener("click", () => {
+  openRoutineScopePicker();
+});
+
+resetRoutineEditorButton.addEventListener("click", () => {
+  resetRoutineEditor();
+  setRoutineStatus("Ready to create a new routine.", "neutral");
+  renderRoutines();
+  routineNameInput.focus();
+});
+
+routineScopeSearchInput.addEventListener("input", () => {
+  state.routines.scopeSearchQuery = routineScopeSearchInput.value;
+  renderRoutineScopePicker();
+});
+
+clearRoutineScopeButton.addEventListener("click", () => {
+  state.routines.draftContext = { folderIds: [], documentIds: [] };
+  renderRoutines();
+});
+
+closeRoutineScopePickerButton.addEventListener("click", () => {
+  state.routines.scopePickerOpen = false;
+  renderRoutines();
+});
+routineSystemPauseButton.addEventListener("click", () => {
+  void toggleRoutineSystemPause();
+});
+
 userLoginBadge.addEventListener("click", () => {
   openUserManagement(userLoginBadge);
 });
@@ -7509,6 +8391,11 @@ document.addEventListener("keydown", (event) => {
     closeUserManagement();
     return;
   }
+  if (event.key === "Escape" && !routinesModal.classList.contains("is-hidden")) {
+    event.preventDefault();
+    closeRoutines();
+    return;
+  }
 
   if (event.key === "Escape" && !documentBrowser.classList.contains("is-hidden")) {
     if (synchronizedPathsMenu && !synchronizedPathsMenu.classList.contains("is-hidden")) {
@@ -7589,9 +8476,11 @@ documentBrowser.addEventListener("scroll", () => {
 
 applyReasoningMode(state.reasoningMode);
 applySourceMode(state.sourceMode);
+applyRoutineSourceMode(state.routines.draftSourceMode);
 renderContextSummary();
 renderDeleteSelectionSummary();
 renderScopePane();
+renderRoutines();
 setLibraryActionStatus("Browse the library, adjust scope, or select a file to edit its metadata.");
 setDocumentEditorStatus("Select a document to rename it, move it, or update its tags.");
 setDocumentEditorState(false);

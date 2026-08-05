@@ -181,6 +181,53 @@ class ContextDocumentGenerator:
             citations=citations,
         )
 
+    def render_text_document(
+        self,
+        *,
+        title: str,
+        body: str,
+        output_format: GeneratedDocumentFormat,
+        citations: list[Citation] | None = None,
+    ) -> GeneratedDocumentResult:
+        """Package already-generated text without making another model call.
+
+        Scheduled routines own a strict one-request execution budget.  Keeping
+        deterministic rendering public lets them reuse the established PDF and
+        DOCX serializers without accidentally invoking document generation a
+        second time.
+        """
+        if output_format not in {"txt", "docx", "pdf"}:
+            raise ValueError("Text documents can only be rendered as TXT, DOCX, or PDF.")
+        normalized_title = str(title or "").strip() or DEFAULT_TEXT_DOCUMENT_NAME
+        normalized_body = str(body or "").strip()
+        if not normalized_body:
+            raise ValueError("Document content is required.")
+        source_citations = list(citations or [])
+        document_text = self._append_sources_section(normalized_body, source_citations)
+        filename = self._build_download_filename(normalized_title, output_format)
+        if output_format == "docx":
+            content_bytes = self._build_docx_bytes(
+                title=normalized_title,
+                content=document_text,
+            )
+            mime_type = DOCX_MIME_TYPE
+        elif output_format == "pdf":
+            content_bytes = self._build_pdf_bytes(
+                title=normalized_title,
+                content=document_text,
+            )
+            mime_type = PDF_MIME_TYPE
+        else:
+            content_bytes = document_text.encode("utf-8")
+            mime_type = TEXT_MIME_TYPE
+        return GeneratedDocumentResult(
+            filename=filename,
+            mime_type=mime_type,
+            content_bytes=content_bytes,
+            message=self._build_success_message(filename, source_citations),
+            citations=source_citations,
+        )
+
     def _collect_supporting_documents(
         self,
         *,

@@ -111,6 +111,25 @@ class Settings:
     source_download_timeout_seconds: int
     source_download_max_attempts: int
     source_download_max_bytes: int
+    routines_enabled: bool
+    routines_database_path: Path
+    routines_scheduler_poll_seconds: int
+    routines_max_per_user: int
+    routines_max_concurrent_global: int
+    routines_max_runs_per_user_daily: int
+    routines_max_runs_global_daily: int
+    routines_max_runs_per_user_monthly: int
+    routines_max_runs_global_monthly: int
+    routines_max_reserved_units_per_user_daily: int
+    routines_max_reserved_units_global_daily: int
+    routines_max_input_budget: int
+    routines_chat_max_output_tokens: int
+    routines_document_max_output_tokens: int
+    routines_max_context_chars: int
+    routines_max_documents: int
+    routines_timeout_seconds: int
+    routines_max_consecutive_failures: int
+    routines_run_retention_days: int
     pdf_ocr_enabled: bool = True
     pdf_ocr_engine: str = "tesseract"
     pdf_ocr_language: str = "eng"
@@ -285,5 +304,75 @@ def get_settings() -> Settings:
         source_download_max_bytes=_to_int(
             os.getenv("SOURCE_DOWNLOAD_MAX_BYTES"),
             20 * 1024 * 1024,
+        ),
+        routines_enabled=_to_bool(os.getenv("ROUTINES_ENABLED"), True),
+        routines_database_path=ROOT_DIR / os.getenv(
+            "ROUTINES_DATABASE_PATH",
+            "app/data/routines.sqlite",
+        ),
+        routines_scheduler_poll_seconds=_to_int(
+            os.getenv("ROUTINES_SCHEDULER_POLL_SECONDS"),
+            30,
+        ),
+        routines_max_per_user=_to_int(os.getenv("ROUTINES_MAX_PER_USER"), 10),
+        routines_max_concurrent_global=_to_int(
+            os.getenv("ROUTINES_MAX_CONCURRENT_GLOBAL"),
+            2,
+        ),
+        routines_max_runs_per_user_daily=_to_int(
+            os.getenv("ROUTINES_MAX_RUNS_PER_USER_DAILY"),
+            10,
+        ),
+        routines_max_runs_global_daily=_to_int(
+            os.getenv("ROUTINES_MAX_RUNS_GLOBAL_DAILY"),
+            50,
+        ),
+        routines_max_runs_per_user_monthly=_to_int(
+            os.getenv("ROUTINES_MAX_RUNS_PER_USER_MONTHLY"),
+            100,
+        ),
+        routines_max_runs_global_monthly=_to_int(
+            os.getenv("ROUTINES_MAX_RUNS_GLOBAL_MONTHLY"),
+            1_000,
+        ),
+        routines_max_reserved_units_per_user_daily=_to_int(
+            os.getenv("ROUTINES_MAX_RESERVED_UNITS_PER_USER_DAILY"),
+            250_000,
+        ),
+        routines_max_reserved_units_global_daily=_to_int(
+            os.getenv("ROUTINES_MAX_RESERVED_UNITS_GLOBAL_DAILY"),
+            2_000_000,
+        ),
+        routines_max_input_budget=_to_int(
+            os.getenv("ROUTINES_MAX_INPUT_BUDGET"),
+            24_000,
+        ),
+        routines_chat_max_output_tokens=_to_int(
+            os.getenv("ROUTINES_CHAT_MAX_OUTPUT_TOKENS"),
+            1_200,
+        ),
+        routines_document_max_output_tokens=_to_int(
+            os.getenv("ROUTINES_DOCUMENT_MAX_OUTPUT_TOKENS"),
+            3_000,
+        ),
+        routines_max_context_chars=_to_int(
+            os.getenv("ROUTINES_MAX_CONTEXT_CHARS"),
+            6_000,
+        ),
+        routines_max_documents=_to_int(
+            os.getenv("ROUTINES_MAX_DOCUMENTS"),
+            3,
+        ),
+        routines_timeout_seconds=_to_int(
+            os.getenv("ROUTINES_TIMEOUT_SECONDS"),
+            60,
+        ),
+        routines_max_consecutive_failures=_to_int(
+            os.getenv("ROUTINES_MAX_CONSECUTIVE_FAILURES"),
+            3,
+        ),
+        routines_run_retention_days=_to_int(
+            os.getenv("ROUTINES_RUN_RETENTION_DAYS"),
+            90,
         ),
     )

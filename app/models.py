@@ -21,6 +21,9 @@ ReasoningMode = Literal["standard", "maximum"]
 UserRole = Literal["admin", "library_manager", "member"]
 UploadSimilarityPolicy = Literal["warn", "replace", "ignore"]
 GeneratedDocumentFormat = Literal["txt", "docx", "pdf", "xlsx"]
+RoutineOutputFormat = Literal["chat", "pdf", "docx"]
+RoutineScheduleKind = Literal["daily", "weekly"]
+RoutineRunStatus = Literal["running", "succeeded", "failed"]
 
 
 class ContextFilter(BaseModel):
@@ -220,6 +223,7 @@ class FolderSummary(BaseModel):
     folder_id: str
     display_name: str
     document_count: int
+    aliases: list[str] = Field(default_factory=list)
 
 
 class DocumentSummary(BaseModel):
@@ -404,6 +408,137 @@ class DocumentGenerationResponse(BaseModel):
     source_mode: SourceMode
     reasoning_mode: ReasoningMode
     context_filter: ContextFilter
+
+
+class RoutineDefinitionRequest(BaseModel):
+    """User-controlled routine fields within a server-owned execution policy."""
+    name: str = Field(min_length=1, max_length=100)
+    instructions: str = Field(min_length=1, max_length=2_000)
+    output_format: RoutineOutputFormat = "chat"
+    source_mode: SourceMode = "internal"
+    schedule_kind: RoutineScheduleKind = "daily"
+    schedule_hour: int = Field(default=9, ge=0, le=23)
+    schedule_minute: int = Field(default=0, ge=0, le=59)
+    schedule_weekday: int | None = Field(default=None, ge=0, le=6)
+    timezone: str = Field(default="America/New_York", min_length=1, max_length=64)
+    context_filter: ContextFilter = Field(default_factory=ContextFilter)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_bounded_routine(self) -> "RoutineDefinitionRequest":
+        self.name = self.name.strip()
+        self.instructions = self.instructions.strip()
+        self.timezone = self.timezone.strip()
+        if not self.name or not self.instructions:
+            raise ValueError("Routine name and instructions cannot be blank.")
+        if not self.timezone:
+            raise ValueError("Routine time zone cannot be blank.")
+        if self.schedule_kind == "weekly" and self.schedule_weekday is None:
+            raise ValueError("Weekly routines require a weekday.")
+        for field_name in ("folder_ids", "document_ids"):
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for raw_value in getattr(self.context_filter, field_name):
+                value = str(raw_value or "").strip()
+                if not value or len(value) > 512:
+                    raise ValueError("Routine scope identifiers must be 1 to 512 characters.")
+                if any(ord(character) < 32 for character in value):
+                    raise ValueError("Routine scope identifiers contain unsupported control characters.")
+                if value not in seen:
+                    seen.add(value)
+                    normalized.append(value)
+            setattr(self.context_filter, field_name, normalized)
+        if self.source_mode == "internal" and not self.context_filter.folder_ids and not self.context_filter.document_ids:
+            raise ValueError("Select at least one internal folder or document.")
+        if len(self.context_filter.folder_ids) + len(self.context_filter.document_ids) > 20:
+            raise ValueError("A routine can scope at most 20 folders and documents.")
+        for value in (self.name, self.instructions):
+            if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
+                raise ValueError("Routine text contains unsupported control characters.")
+        return self
+
+
+class RoutineSummary(BaseModel):
+    routine_id: str
+    owner_user_id: str
+    name: str
+    instructions: str
+    output_format: RoutineOutputFormat
+    source_mode: SourceMode = "internal"
+    schedule_kind: RoutineScheduleKind
+    schedule_hour: int
+    schedule_minute: int
+    schedule_weekday: int | None = None
+    timezone: str
+    context_filter: ContextFilter
+    enabled: bool
+    consecutive_failures: int
+    last_run_at: str | None = None
+    next_run_at: str
+    created_at: str
+    updated_at: str
+
+
+class RoutineRunSummary(BaseModel):
+    run_id: str
+    routine_id: str
+    routine_name: str
+    trigger: Literal["manual", "scheduled"]
+    status: RoutineRunStatus
+    response_text: str | None = None
+    filename: str | None = None
+    mime_type: str | None = None
+    has_document: bool = False
+    citations: list[Citation] = Field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    reserved_units: int
+    error_code: str | None = None
+    started_at: str
+    completed_at: str | None = None
+
+
+class RoutineDashboardResponse(BaseModel):
+    routines: list[RoutineSummary]
+    runs: list[RoutineRunSummary]
+    system_paused: bool
+    policy: dict[str, int | bool]
+
+
+class RoutineMutationResponse(BaseModel):
+    routine: RoutineSummary
+    message: str
+
+
+class RoutineDeleteResponse(BaseModel):
+    routine_id: str
+    deleted: bool
+    message: str
+
+
+class RoutineRunDeleteResponse(BaseModel):
+    run_id: str
+    deleted: bool
+    message: str
+
+
+class RoutineRunResponse(BaseModel):
+    run: RoutineRunSummary
+    message: str
+
+
+class RoutinePauseRequest(BaseModel):
+    paused: bool
+
+
+class RoutineEnableRequest(BaseModel):
+    enabled: bool
+
+
+class RoutineSystemStatusResponse(BaseModel):
+    system_paused: bool
+    message: str
 
 
 class DocumentDeleteRequest(BaseModel):

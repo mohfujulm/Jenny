@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-from app import main
 from app.watch_folders import WatchedFolderRecord, WatchedFolderService
+from tests.main_runtime import main
 
 
 class WatchedFolderOpenSourceTests(unittest.TestCase):

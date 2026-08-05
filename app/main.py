@@ -9,6 +9,7 @@ services own extraction, retrieval, generation, and persistence behavior.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import platform
@@ -17,7 +18,7 @@ import queue
 import subprocess
 import threading
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from openai import OpenAIError
@@ -69,6 +70,15 @@ from app.models import (
     DocumentSummary,
     FolderSummary,
     LocalFolderBrowseResponse,
+    RoutineDashboardResponse,
+    RoutineDeleteResponse,
+    RoutineDefinitionRequest,
+    RoutineEnableRequest,
+    RoutineMutationResponse,
+    RoutinePauseRequest,
+    RoutineRunResponse,
+    RoutineRunDeleteResponse,
+    RoutineSystemStatusResponse,
     SavedConversationDetail,
     UploadedDocumentSummary,
     WatchedFolderCreateRequest,
@@ -86,12 +96,21 @@ from app.openai_agent import BusinessKnowledgeAgent, ChatCancelledError, Session
 from app.ocr import get_ocr_runtime_status
 from app.pdf_vision import get_pdf_vision_runtime_status
 from app.reasoning_profiles import get_chat_reasoning_profiles
+from app.routines import RoutineScheduler, RoutineService
+from app.routine_store import (
+    RoutineConflictError,
+    RoutineNotFoundError,
+    RoutinePolicy,
+    RoutineQuotaExceededError,
+    RoutineStore,
+)
 from app.ui_sessions import BrowserSessionRegistry
 from app.user_store import DuplicateUsernameError, InvalidCredentialsError, UserStore
 
 
 pdf_logger = logging.getLogger("app.pdf_ingestion")
 network_logger = logging.getLogger("app.network")
+auth_logger = logging.getLogger("app.authentication")
 settings = get_settings()
 pdf_ocr_status = get_ocr_runtime_status(settings)
 if pdf_ocr_status["enabled"] and not pdf_ocr_status["available"]:
@@ -99,28 +118,18 @@ if pdf_ocr_status["enabled"] and not pdf_ocr_status["available"]:
 document_store = build_document_store(settings)
 ingestion_service = DocumentIngestionService(settings)
 watch_folder_service = WatchedFolderService(settings, ingestion_service)
-user_store = UserStore(settings.application_database_path)
-default_admin_user = user_store.ensure_default_admin(
-    username=settings.default_admin_username,
-    display_name=settings.default_admin_display_name,
-    password=settings.default_admin_password,
-)
-conversation_store = SavedConversationStore(
-    settings.saved_conversations_database_path,
-    default_owner_user_id=default_admin_user.user_id,
-    legacy_json_path=settings.saved_conversations_path,
-)
-session_manager = SessionManager(
-    settings.session_ttl_minutes,
-    saved_conversations=conversation_store,
-)
 document_generator = ContextDocumentGenerator(settings, document_store)
-agent = BusinessKnowledgeAgent(
-    settings,
-    document_store,
-    session_manager,
-    document_generator=document_generator,
-)
+# User and conversation persistence is initialized by FastAPI startup. Keeping
+# these globals empty during module import prevents test discovery and utility
+# imports from opening or mutating the production user database.
+user_store: UserStore | None = None
+conversation_store: SavedConversationStore | None = None
+session_manager: SessionManager | None = None
+agent: BusinessKnowledgeAgent | None = None
+routine_store: RoutineStore | None = None
+routine_service: RoutineService | None = None
+routine_scheduler: RoutineScheduler | None = None
+_runtime_services_lock = threading.Lock()
 ui_session_registry = BrowserSessionRegistry()
 
 app = FastAPI(title=settings.app_title)
@@ -128,12 +137,85 @@ AUTH_COOKIE_NAME = "askjenny_session"
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 INDEX_TEMPLATE_PATH = STATIC_DIR / "index.html"
+ROUTINES_TEMPLATE_PATH = STATIC_DIR / "routines.html"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 NETWORK_STATUS_CACHE_SECONDS = 30
 _network_status_lock = threading.Lock()
 _network_status_checked_at = 0.0
 _network_status_cache: dict[str, object] | None = None
+
+
+def initialize_user_runtime_services() -> None:
+    """Initialize mutable user/conversation services exactly once at startup."""
+    global user_store, conversation_store, session_manager, agent
+    global routine_store, routine_service, routine_scheduler
+    with _runtime_services_lock:
+        if all(
+            service is not None
+            for service in (
+                user_store,
+                conversation_store,
+                session_manager,
+                agent,
+                routine_store,
+                routine_service,
+                routine_scheduler,
+            )
+        ):
+            return
+
+        initialized_user_store = UserStore(settings.application_database_path)
+        bootstrap_user = initialized_user_store.ensure_default_admin(
+            username=settings.default_admin_username,
+            display_name=settings.default_admin_display_name,
+            password=settings.default_admin_password,
+        )
+        if bootstrap_user.role != "admin" or not bootstrap_user.is_active:
+            auth_logger.warning(
+                "Configured bootstrap account is not an active administrator; "
+                "startup preserved its current account state."
+            )
+        initialized_conversation_store = SavedConversationStore(
+            settings.saved_conversations_database_path,
+            default_owner_user_id=bootstrap_user.user_id,
+            legacy_json_path=settings.saved_conversations_path,
+        )
+        initialized_session_manager = SessionManager(
+            settings.session_ttl_minutes,
+            saved_conversations=initialized_conversation_store,
+        )
+        initialized_agent = BusinessKnowledgeAgent(
+            settings,
+            document_store,
+            initialized_session_manager,
+            document_generator=document_generator,
+        )
+        initialized_routine_store = RoutineStore(
+            settings.routines_database_path,
+            RoutinePolicy.from_settings(settings),
+        )
+        initialized_routine_service = RoutineService(
+            settings=settings,
+            store=initialized_routine_store,
+            document_store=document_store,
+            document_generator=document_generator,
+            user_store=initialized_user_store,
+        )
+        initialized_routine_scheduler = RoutineScheduler(
+            initialized_routine_service,
+            settings.routines_scheduler_poll_seconds,
+        )
+
+        # Publish only a complete dependency graph; a failed initialization can
+        # be retried without exposing a partially configured runtime.
+        user_store = initialized_user_store
+        conversation_store = initialized_conversation_store
+        session_manager = initialized_session_manager
+        agent = initialized_agent
+        routine_store = initialized_routine_store
+        routine_service = initialized_routine_service
+        routine_scheduler = initialized_routine_scheduler
 
 
 def _get_openai_network_status(*, force: bool = False) -> dict[str, object]:
@@ -433,6 +515,7 @@ def _open_tk_folder_picker() -> str | None:
 
 @app.on_event("startup")
 def start_watched_folder_scheduler() -> None:
+    initialize_user_runtime_services()
     network_status = _get_openai_network_status(force=True)
     if network_status["reachable"]:
         network_logger.info("OpenAI API network access is available.")
@@ -442,10 +525,13 @@ def start_watched_folder_scheduler() -> None:
             network_status["detail"],
         )
     watch_folder_service.start()
+    routine_scheduler.start()
 
 
 @app.on_event("shutdown")
 def stop_watched_folder_scheduler() -> None:
+    if routine_scheduler is not None:
+        routine_scheduler.stop()
     watch_folder_service.stop()
 
 
@@ -530,6 +616,14 @@ def _require_library_manager(request: Request):
             status_code=403,
             detail="Administrator or Library Manager access is required.",
         )
+    return user
+
+
+def _require_administrator(request: Request):
+    """Require a signed-in administrator for system-wide routine controls."""
+    user = _require_authenticated_user(request)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Administrator access is required.")
     return user
 
 
@@ -627,6 +721,224 @@ def logout(request: Request, response: Response) -> AuthSessionResponse:
         authenticated=False,
         user=None,
         message="Signed out.",
+    )
+
+
+def _render_routines_html() -> str:
+    template = ROUTINES_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return (
+        template
+        .replace("{{APP_CSS_URL}}", _asset_url("app.css"))
+        .replace("{{ROUTINES_CSS_URL}}", _asset_url("routines-window.css"))
+        .replace("{{ROUTINES_JS_URL}}", _asset_url("routines-window.js"))
+        .replace("{{APP_ICON_URL}}", _asset_url("jenny-logo.png"))
+    )
+
+
+def _active_routine_service() -> RoutineService:
+    if routine_service is None:
+        raise HTTPException(status_code=503, detail="Routine service is not ready.")
+    return routine_service
+
+
+def _require_same_origin(request: Request) -> None:
+    """Reject cross-site cookie-authenticated routine mutations."""
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-site request rejected.")
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return
+    expected = urlsplit(str(request.base_url))
+    supplied = urlsplit(origin)
+    if (supplied.scheme, supplied.netloc.lower()) != (
+        expected.scheme,
+        expected.netloc.lower(),
+    ):
+        raise HTTPException(status_code=403, detail="Cross-site request rejected.")
+
+
+def _raise_routine_http_error(exc: Exception) -> None:
+    if isinstance(exc, RoutineNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, RoutineQuotaExceededError):
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    if isinstance(exc, RoutineConflictError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Provider exceptions and internal failures may contain request fragments;
+    # never echo them through the authenticated API.
+    raise HTTPException(
+        status_code=502,
+        detail="The routine could not complete. The failed attempt was recorded and no retry was made.",
+    ) from exc
+
+
+@app.get("/api/routines", response_model=RoutineDashboardResponse)
+def get_routines(
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineDashboardResponse:
+    return RoutineDashboardResponse.model_validate(
+        _active_routine_service().dashboard(user.user_id)
+    )
+
+
+@app.post(
+    "/api/routines",
+    response_model=RoutineMutationResponse,
+    status_code=201,
+)
+def create_routine(
+    definition: RoutineDefinitionRequest,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineMutationResponse:
+    _require_same_origin(request)
+    try:
+        routine = _active_routine_service().create(user.user_id, definition)
+        return RoutineMutationResponse(
+            routine=routine.to_dict(),
+            message="Routine created with bounded server-side execution limits.",
+        )
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.put("/api/routines/{routine_id}", response_model=RoutineMutationResponse)
+def update_routine(
+    routine_id: str,
+    definition: RoutineDefinitionRequest,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineMutationResponse:
+    _require_same_origin(request)
+    try:
+        routine = _active_routine_service().update(
+            user.user_id,
+            routine_id,
+            definition,
+        )
+        return RoutineMutationResponse(routine=routine.to_dict(), message="Routine updated.")
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.post(
+    "/api/routines/{routine_id}/enabled",
+    response_model=RoutineMutationResponse,
+)
+def set_routine_enabled(
+    routine_id: str,
+    body: RoutineEnableRequest,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineMutationResponse:
+    _require_same_origin(request)
+    try:
+        routine = _active_routine_service().set_enabled(
+            user.user_id,
+            routine_id,
+            body.enabled,
+        )
+        return RoutineMutationResponse(
+            routine=routine.to_dict(),
+            message="Routine enabled." if body.enabled else "Routine paused.",
+        )
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.delete("/api/routines/{routine_id}", response_model=RoutineDeleteResponse)
+def delete_routine(
+    routine_id: str,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineDeleteResponse:
+    _require_same_origin(request)
+    try:
+        _active_routine_service().delete(user.user_id, routine_id)
+        return RoutineDeleteResponse(
+            routine_id=routine_id,
+            deleted=True,
+            message="Routine and its stored results were deleted.",
+        )
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.post("/api/routines/{routine_id}/run", response_model=RoutineRunResponse)
+def run_routine(
+    routine_id: str,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineRunResponse:
+    _require_same_origin(request)
+    try:
+        run = _active_routine_service().run_now(user.user_id, routine_id)
+        return RoutineRunResponse(run=run, message="Routine completed.")
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.delete("/api/routines/runs/{run_id}", response_model=RoutineRunDeleteResponse)
+def delete_routine_run_output(
+    run_id: str,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> RoutineRunDeleteResponse:
+    _require_same_origin(request)
+    try:
+        _active_routine_service().delete_run_output(user.user_id, run_id)
+        return RoutineRunDeleteResponse(
+            run_id=run_id,
+            deleted=True,
+            message="Routine output and generated file were deleted.",
+        )
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+
+
+@app.get("/api/routines/runs/{run_id}/document")
+def download_routine_document(
+    run_id: str,
+    request: Request,
+    user=Depends(_require_authenticated_user),
+) -> StreamingResponse:
+    try:
+        filename, mime_type, content = _active_routine_service().store.get_run_document(
+            user.user_id,
+            run_id,
+        )
+    except Exception as exc:
+        _raise_routine_http_error(exc)
+    encoded_filename = quote(filename, safe="")
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type=mime_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
+    )
+
+
+@app.post(
+    "/api/routines/admin/pause",
+    response_model=RoutineSystemStatusResponse,
+)
+def set_routine_system_pause(
+    body: RoutinePauseRequest,
+    request: Request,
+    user=Depends(_require_administrator),
+) -> RoutineSystemStatusResponse:
+    _require_same_origin(request)
+    service = _active_routine_service()
+    service.store.set_system_paused(body.paused)
+    return RoutineSystemStatusResponse(
+        system_paused=body.paused,
+        message=(
+            "All new routine runs are paused."
+            if body.paused
+            else "Routine execution is available."
+        ),
     )
 
 
@@ -1031,6 +1343,18 @@ def delete_conversation(conversation_id: str, request: Request) -> ConversationD
 def list_documents() -> DocumentLibraryResponse:
     library = document_store.list_documents()
     folder_records = library.folders
+    aliases_by_folder: dict[str, list[str]] = {}
+    # Folder aliases are safe library metadata. Deliberately do not expose watched
+    # folder source paths or synchronization configuration to ordinary members.
+    for watched_folder in watch_folder_service.list_watchers():
+        folder_id = normalize_folder_path(str(watched_folder.get("library_folder") or ""))
+        if not folder_id:
+            continue
+        aliases = aliases_by_folder.setdefault(folder_id, [])
+        for value in (watched_folder.get("alias"), watched_folder.get("display_name")):
+            alias = str(value or "").strip()
+            if alias and alias not in aliases:
+                aliases.append(alias)
     if settings.docstore_backend in {"json", "semantic"}:
         explicit_folder_ids = load_folder_registry(settings.docstore_folders_path)
         exact_folder_counts = {
@@ -1051,6 +1375,7 @@ def list_documents() -> DocumentLibraryResponse:
                 folder_id=folder.folder_id,
                 display_name=folder.display_name,
                 document_count=folder.document_count,
+                aliases=aliases_by_folder.get(normalize_folder_path(folder.folder_id), []),
             )
             for folder in folder_records
         ],
@@ -1601,5 +1926,13 @@ def rename_folder(request: FolderRenameRequest) -> FolderRenameResponse:
 def index() -> HTMLResponse:
     return HTMLResponse(
         content=_render_index_html(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/routines")
+def routines_window() -> HTMLResponse:
+    return HTMLResponse(
+        content=_render_routines_html(),
         headers={"Cache-Control": "no-store"},
     )

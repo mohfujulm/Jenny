@@ -10,9 +10,9 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException, Response
 from starlette.requests import Request
 
-from app import main
 from app.models import AuthLoginRequest, AuthSignupRequest
 from app.user_store import UserStore
+from tests.main_runtime import main
 
 
 def _request_with_cookie(cookie: str = "") -> Request:

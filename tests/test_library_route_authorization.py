@@ -10,10 +10,10 @@ from unittest.mock import Mock, patch
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-from app import main
-from app.datastore import DocumentLibraryRecord
+from app.datastore import DocumentLibraryRecord, FolderRecord
 from app.ingestion import UploadOutcome
 from app.user_store import UserStore
+from tests.main_runtime import main
 
 
 AUTHENTICATED_ROUTES = {
@@ -148,6 +148,46 @@ class LibraryRouteAuthorizationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         document_store.list_documents.assert_called_once_with()
+
+    def test_member_receives_folder_aliases_without_watched_source_details(self) -> None:
+        document_store = Mock()
+        document_store.list_documents.return_value = DocumentLibraryRecord(
+            backend="semantic",
+            total_documents=0,
+            total_chunks=0,
+            folders=[FolderRecord(folder_id="shared/project", display_name="project", document_count=0)],
+            documents=[],
+        )
+        watch_service = Mock()
+        watch_service.list_watchers.return_value = [
+            {
+                "library_folder": "shared/project",
+                "alias": "PANYNJ EWR",
+                "display_name": "Project Notes",
+                "source_path": r"C:\\private\\Dropbox\\project",
+                "root_path": r"C:\\private\\Dropbox",
+            }
+        ]
+        with (
+            patch.object(main, "user_store", self.user_store),
+            patch.object(main, "document_store", document_store),
+            patch.object(main, "watch_folder_service", watch_service),
+        ):
+            client = self._client(self.member_token)
+            try:
+                response = client.get("/api/documents")
+            finally:
+                client.close()
+
+        self.assertEqual(response.status_code, 200)
+        folder = next(
+            item
+            for item in response.json()["folders"]
+            if item["folder_id"] == "shared/project"
+        )
+        self.assertEqual(folder["aliases"], ["PANYNJ EWR", "Project Notes"])
+        self.assertNotIn("source_path", folder)
+        self.assertNotIn("root_path", folder)
 
     def test_member_cannot_list_watched_source_paths(self) -> None:
         watch_service = Mock()
